@@ -46,6 +46,12 @@ type ChatInput struct {
 	// the two tools relevant to the latest user message. Nil means the full
 	// profile set.
 	Tools []string `json:"tools,omitempty"`
+	// MessageID identifies this run — the id the sse handler hands its
+	// Producer — so step checkpoints (see Checkpointer) are keyed to it.
+	// It may stay empty when no Checkpointer is configured; with one,
+	// every run must set it or concurrent runs overwrite each other's
+	// checkpoints.
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // ToolTrace is one executed tool call: its name, raw input and serialised

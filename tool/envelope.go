@@ -139,6 +139,14 @@ type envelopeWire struct {
 	Provenance       string          `json:"provenance"`
 }
 
+// isEnvelope reports whether any envelope channel was present in the blob.
+// A bare result decodes into an all-empty envelopeWire (or fails to decode
+// into an object at all).
+func (w envelopeWire) isEnvelope() bool {
+	return len(w.ModelObservation) > 0 || len(w.UIPayload) > 0 ||
+		len(w.RuntimeState) > 0 || len(w.Artifacts) > 0
+}
+
 // ProjectModelObservation extracts the model-visible slice from a persisted
 // tool_result blob. If the blob is an Envelope, it returns the
 // re-serialised model_observation field (or "null" when the field is
@@ -165,8 +173,7 @@ func ProjectModelObservation(raw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return raw
 	}
-	if len(w.ModelObservation) == 0 && len(w.UIPayload) == 0 &&
-		len(w.RuntimeState) == 0 && len(w.Artifacts) == 0 {
+	if !w.isEnvelope() {
 		return raw
 	}
 	obs := w.ModelObservation

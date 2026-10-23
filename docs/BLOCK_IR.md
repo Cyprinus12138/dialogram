@@ -19,12 +19,15 @@ sequence of `Block`s:
 
 ```go
 type Block struct {
-    Type       BlockType       // "text" | "tool_use" | "tool_result"
+    Type       BlockType       // "text" | "tool_use" | "tool_result" | "image"
     Text       string
     ToolUseID  string          // neutral id minted by the runtime ("dg_…")
     ToolName   string
     ToolInput  json.RawMessage
     ToolResult json.RawMessage // the full serialised tool result
+    MediaType  string          // image: image/png, image/jpeg, image/gif, image/webp
+    Data       string          // image: base64 bytes — or
+    URL        string          // image: a public URL
 }
 
 type Turn struct {
@@ -37,6 +40,25 @@ Each provider has a translator in both directions. Anthropic packs a tool
 turn into one user message of `tool_result` blocks; OpenAI expands it into
 one `role: tool` message per result. The provider's native id is discarded
 at response-to-IR translation and never stored.
+
+### Image blocks
+
+A user turn may carry images next to its text:
+`agent.UserTurnBlocks(agent.TextBlock("what is this?"), agent.ImageBlock("image/png", b64))`,
+or `agent.ImageURLBlock(url)` for an image the provider fetches itself. The
+block holds either base64 `Data` with a `MediaType` (`image/png`,
+`image/jpeg`, `image/gif`, `image/webp`) or a `URL`, never both. Anthropic
+renders it as an `image` block with a `base64` or `url` source; OpenAI as
+an `image_url` part carrying a `data:` URI or the plain URL. A text-only
+user turn keeps the shape it has always had — a string on both wires —
+and only a turn that actually carries an image becomes a content array.
+
+Images are valid in user turns only. A translator returns an error, before
+any request is made, for an image in an assistant or tool turn, an
+unsupported media type, or a block with both or neither of `Data` and
+`URL`. Tool results stay JSON text. The honesty guard, pause detection and
+the grounded-number harvest switch on block type and leave image blocks
+alone.
 
 ## The three-channel envelope
 

@@ -56,8 +56,46 @@ All notable changes to this project are documented here. The format follows
   `{"text": …}`, binary parts as omitted placeholders, `isError` as a
   `MCP_TOOL_ERROR` soft failure, per-call timeouts as `UPSTREAM_TIMEOUT`.
   Wraps `github.com/modelcontextprotocol/go-sdk`.
+- `tool/mcp`: `Tools` and `Register` map the server's annotation hints
+  onto `tool.Annotations` so `agent.PolicyInterceptor` can act on them.
+  Undeclared tools stay zero (dialogram's all-false default) rather than
+  taking MCP's destructive/open-world defaults;
+  `RegisterOptions.AssumeOpenWorld` marks them `OpenWorld` so
+  `Policy.PauseOpenWorld` pauses every undeclared remote tool.
+- `tool/mcp`: `RegisterOptions.Untrusted` wraps every successful result
+  in `tool.UntrustedEnvelope` so `ProjectModelObservation` fences it as
+  data; soft failures stay bare.
 - `examples/mcptools`: connects to an MCP server, registers its tools and
   prints the Anthropic spec; optionally invokes one tool.
+- `tool`: the execution seam — `Call`, `Executor`, `ConcurrencyLimiter` —
+  and the default `LocalExecutor` (`NewLocalExecutor`,
+  `LocalExecutorOptions`): a per-call timeout (`Tool.Timeout` overrides it
+  per tool; `TOOL_TIMEOUT` soft failure), panic recovery (`TOOL_PANIC`
+  soft failure, stack logged), a per-step concurrency bound, and a cap on
+  the model-visible bytes of a result (`CapObservation`,
+  `TruncatedObservation`; `ui_payload` and `runtime_state` are never
+  capped). Wired through `Options.Executor` on both providers and
+  `Deps.Executor` at the root; `Registry.Call` is unchanged.
+- `agent`: step checkpoints — `Checkpoint`, `Checkpointer`,
+  `MemCheckpointer`, `ChatInput.MessageID`, `DanglingToolUses`, and the
+  recovery helpers `CloseDangling` / `Config.CloseDangling`
+  (`RUN_INTERRUPTED` results for unanswered calls; pause tools stay
+  pending). The loop saves a checkpoint after every assistant turn and
+  every tool turn; wired through `Options.Checkpointer` on both providers
+  and `Deps.Checkpointer` at the root. The example server uses
+  `MemCheckpointer`; `docs/STREAMING.md` documents the recovery flow.
+- Tool dispatch always produces one result per `tool_use`, including a
+  call still queued when the context ends (`HARD_FAILURE`), so the tool
+  turn stays well-formed on both wires.
+- `agent.BlockImage`: image blocks in user turns (`ImageBlock`,
+  `ImageURLBlock`, `TextBlock`, `UserTurnBlocks`, `IsImageMediaType`),
+  translated to an Anthropic `image` block or an OpenAI `image_url` part
+  and rejected with a clear error anywhere outside a user turn.
+- Recorded wire-format fixtures under `provider/*/testdata` and the
+  `provider/internal/replay` server: both adapters run end to end from
+  hand-written upstream responses — text, tool loop, parallel tools,
+  pause, soft failure, transient-error retry, cross-provider resume and
+  image turns — with no network or API key.
 
 ### Changed (relative to the production code this was extracted from)
 - Grounding is outcome-aware: a tool call whose result carries

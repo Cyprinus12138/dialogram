@@ -226,3 +226,60 @@ func TestInterceptors(t *testing.T) {
 		t.Fatalf("denied body wrong: %v %v", env, err)
 	}
 }
+
+func TestImageBlockHelpers(t *testing.T) {
+	turn := UserTurnBlocks(TextBlock("look"), ImageBlock("image/png", "QUJD"), ImageURLBlock("https://example.com/a.png"))
+	if turn.Role != RoleUser || len(turn.Blocks) != 3 || turn.Blocks[0].Type != BlockText || turn.Blocks[0].Text != "look" {
+		t.Fatalf("turn = %+v", turn)
+	}
+	if b := turn.Blocks[1]; b.Type != BlockImage || b.MediaType != "image/png" || b.Data != "QUJD" || b.URL != "" {
+		t.Errorf("inline image block = %+v", b)
+	}
+	if b := turn.Blocks[2]; b.Type != BlockImage || b.URL != "https://example.com/a.png" || b.Data != "" || b.MediaType != "" {
+		t.Errorf("url image block = %+v", b)
+	}
+	// The persisted JSON carries the image fields only where they are set.
+	raw, err := json.Marshal(turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(raw); strings.Count(s, `"media_type"`) != 1 || strings.Count(s, `"url"`) != 1 || strings.Contains(s, `"data":""`) {
+		t.Errorf("json = %s", s)
+	}
+	var back Turn
+	if err := json.Unmarshal(raw, &back); err != nil || len(back.Blocks) != 3 || back.Blocks[1].Type != BlockImage || back.Blocks[1].Data != "QUJD" || back.Blocks[2].URL != "https://example.com/a.png" {
+		t.Errorf("round trip = %+v (%v)", back, err)
+	}
+	// A text-only UserTurnBlocks is byte-identical to UserTurn.
+	a, _ := json.Marshal(UserTurn("hi"))
+	b, _ := json.Marshal(UserTurnBlocks(TextBlock("hi")))
+	if string(a) != string(b) {
+		t.Errorf("UserTurnBlocks(TextBlock) = %s, UserTurn = %s", b, a)
+	}
+	for _, mt := range []string{"image/png", "image/jpeg", "image/gif", "image/webp"} {
+		if !IsImageMediaType(mt) {
+			t.Errorf("%s must be accepted", mt)
+		}
+	}
+	if IsImageMediaType("image/bmp") || IsImageMediaType("") {
+		t.Error("unsupported media types must be rejected")
+	}
+}
+
+// Image bytes are not numbers a tool vouched for, and an image turn is not
+// a pause: the guard, the grounded-number harvest and pause detection all
+// switch on block type and leave image blocks alone.
+func TestImageBlocksAreInertToGuardAndPause(t *testing.T) {
+	history := []Turn{UserTurnBlocks(TextBlock("how much is this?"), ImageBlock("image/png", "AAAA1234AAAA"))}
+	if g := CollectGroundedNumbers(history, 2); len(g) != 0 {
+		t.Fatalf("image data must not seed the grounded set: %v", g)
+	}
+	if _, _, ok := FindPendingHITL(history); ok {
+		t.Fatal("an image turn is not a pending pause")
+	}
+	guard := NewGuard("get_weather")
+	out := &ChatOutput{Reply: "That will be €1,234.", Turns: []Turn{{Role: RoleAssistant, Blocks: []Block{TextBlock("That will be €1,234.")}}}}
+	if reds := guard.GuardReply(history, out); len(reds) != 1 || strings.Contains(out.Reply, "1,234") || strings.Contains(out.Turns[0].Blocks[0].Text, "1,234") {
+		t.Fatalf("a figure that only matches image bytes must still be redacted: %q %+v", out.Reply, reds)
+	}
+}

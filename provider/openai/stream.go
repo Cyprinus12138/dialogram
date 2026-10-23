@@ -23,6 +23,7 @@ type toolAcc struct{ ID, Name, Args string }
 // index and handed to the shared runner on finish_reason=tool_calls.
 func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agent.EmitFn) error {
 	turns := in.InputTurns()
+	inputLen := len(turns)
 	st := p.prepare(in)
 
 	var totalIn, totalOut, totalCacheRead int
@@ -36,7 +37,10 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 	}
 
 	for step := 0; step < st.profile.MaxSteps(); step++ {
-		msgs := turnsToMessages(st.sysPrompt, turns)
+		msgs, err := turnsToMessages(st.sysPrompt, turns)
+		if err != nil {
+			return err
+		}
 		lastBreakdown = breakdown(msgs, st.toolSpecs)
 		loop.LogBreakdown(p.Name(), "stream", step, lastBreakdown)
 		body := p.requestBody(st, msgs, true)
@@ -192,6 +196,7 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			})
 		}
 		turns = append(turns, assistantTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 		snapshot := assistantTurn
 		emit(agent.StreamEvent{Type: agent.EventTurn, Turn: &snapshot})
 
@@ -207,6 +212,7 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			return nil
 		}
 		turns = append(turns, toolTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 		toolSnapshot := toolTurn
 		emit(agent.StreamEvent{Type: agent.EventTurn, Turn: &toolSnapshot})
 	}
@@ -221,6 +227,8 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 	if final != "" {
 		emit(agent.StreamEvent{Type: agent.EventText, Delta: final})
 		synth := agent.Turn{Role: agent.RoleAssistant, Blocks: []agent.Block{{Type: agent.BlockText, Text: final}}}
+		turns = append(turns, synth)
+		p.runner.Checkpoint(ctx, in.MessageID, st.profile.MaxSteps()+1, turns[inputLen:])
 		emit(agent.StreamEvent{Type: agent.EventTurn, Turn: &synth})
 	}
 	emitUsage()

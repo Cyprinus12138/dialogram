@@ -280,10 +280,17 @@ func main() {
 		Profiles:       map[string]agent.Profile{"assistant": {SystemPrompt: systemPrompt, MaxToolSteps: 8}},
 		DefaultProfile: "assistant",
 	}
+	// Step checkpoints: the loop hands the block IR here at every step
+	// boundary, so a turn that dies mid-way can be closed with
+	// agent.CloseDangling and resumed (see docs/STREAMING.md). In memory
+	// for the example; production keys this on the same store as the
+	// conversations.
+	checkpoints := agent.NewMemCheckpointer()
 	deps := dialogram.Deps{
 		Registry:     reg,
 		Config:       cfg,
 		Interceptors: []agent.Interceptor{agent.NewApprovalListInterceptor([]string{"book_flight"})},
+		Checkpointer: checkpoints,
 	}
 	if os.Getenv("GUARD") != "" {
 		deps.Guard = agent.NewGuard("get_weather", "search_flights")
@@ -329,10 +336,12 @@ func main() {
 		// Second meta frame: the conversation id, so a client that created a
 		// fresh conversation learns it from the stream itself.
 		emit(agent.StreamEvent{Type: agent.EventMeta, Message: conv.ID, Provider: ag.Provider(), Model: ag.Model()})
-		return ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant"}, emit)
+		return ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant", MessageID: msgID}, emit)
 	}
 
 	onFinish := func(_ context.Context, r sse.Result) {
+		// The turns are persisted below; the checkpoint has done its job.
+		checkpoints.Delete(r.MessageID)
 		db.mu.Lock()
 		defer db.mu.Unlock()
 		convID := db.byMsg[r.MessageID]

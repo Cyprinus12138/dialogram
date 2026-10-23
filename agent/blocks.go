@@ -30,6 +30,14 @@ type Block struct {
 	// serialised by the tool. OpenAI's tool-role content takes this string
 	// verbatim; Anthropic's tool_result.content accepts the same string.
 	ToolResult json.RawMessage `json:"tool_result,omitempty"`
+	// MediaType, Data and URL describe a BlockImage: MediaType is one of
+	// the image/* types IsImageMediaType accepts, and exactly one of Data
+	// (base64, without a data: prefix) or URL is set. Images are only
+	// valid in user turns; each translator maps the block to its own
+	// image part and rejects it anywhere else.
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // BlockType enumerates the block kinds the IR supports.
@@ -39,11 +47,13 @@ const (
 	BlockText       BlockType = "text"
 	BlockToolUse    BlockType = "tool_use"
 	BlockToolResult BlockType = "tool_result"
+	// BlockImage is an image the user sent, inline as base64 or by URL.
+	BlockImage BlockType = "image"
 )
 
 // Turn is one role-scoped sequence of blocks. Role is one of:
 //
-//   - "user"      — user-sent text (Blocks are all BlockText)
+//   - "user"      — user-sent content (BlockText and BlockImage)
 //   - "assistant" — model output (may mix BlockText and BlockToolUse)
 //   - "tool"      — tool execution results (Blocks are all BlockToolResult,
 //     one per BlockToolUse in the immediately preceding assistant turn)
@@ -67,6 +77,38 @@ const (
 // UserTurn builds a single-text user turn.
 func UserTurn(text string) Turn {
 	return Turn{Role: RoleUser, Blocks: []Block{{Type: BlockText, Text: text}}}
+}
+
+// UserTurnBlocks builds a user turn from explicit blocks — text and image
+// blocks in any order. The translators render a turn that carries an image
+// as a content array; a text-only turn keeps the shape UserTurn produces.
+func UserTurnBlocks(blocks ...Block) Turn {
+	return Turn{Role: RoleUser, Blocks: append([]Block(nil), blocks...)}
+}
+
+// TextBlock builds a text block.
+func TextBlock(text string) Block { return Block{Type: BlockText, Text: text} }
+
+// ImageBlock builds an inline image block from base64 data (no data: URI
+// prefix) and its media type: image/png, image/jpeg, image/gif or
+// image/webp. Validation happens at translation time, so an unsupported
+// type surfaces as a provider error on the next call, not here.
+func ImageBlock(mediaType, base64Data string) Block {
+	return Block{Type: BlockImage, MediaType: mediaType, Data: base64Data}
+}
+
+// ImageURLBlock builds an image block the provider fetches itself from a
+// public URL.
+func ImageURLBlock(url string) Block { return Block{Type: BlockImage, URL: url} }
+
+// IsImageMediaType reports whether mt is one of the image media types both
+// providers accept for an inline image.
+func IsImageMediaType(mt string) bool {
+	switch mt {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	}
+	return false
 }
 
 // normalizeRole coerces an incoming chat role to "user" or "assistant".

@@ -44,6 +44,11 @@ type Tool struct {
 	// and OpenAISpec ignore them, so the wire tool list and the eval
 	// manifest hash are unchanged by annotating a tool.
 	Annotations Annotations `json:"annotations,omitzero"`
+	// Timeout is an optional per-tool execution deadline enforced by
+	// LocalExecutor. 0 inherits LocalExecutorOptions.Timeout. Set it on
+	// tools whose natural latency differs from the default — a slow report
+	// generator, or a cache lookup that should fail fast.
+	Timeout time.Duration
 }
 
 // Annotations are behavioural hints about a tool, mirroring the MCP tool

@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-FixtureSoftFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureSoftFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"The weather service has no data for that city right now, so I can't give you a reading."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureSoftFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureSoftFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[],"usage":{"prompt_tokens":358,"completion_tokens":24,"total_tokens":382,"prompt_tokens_details":{"cached_tokens":256,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+
+data: [DONE]
+

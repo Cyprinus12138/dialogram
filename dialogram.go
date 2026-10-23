@@ -71,6 +71,13 @@ type Deps struct {
 	Config       *agent.Config
 	Interceptors []agent.Interceptor
 	Skills       *agent.SkillLibrary
+	// Executor runs tool calls; nil selects tool.NewLocalExecutor with the
+	// default limits.
+	Executor tool.Executor
+	// Checkpointer, when non-nil, receives the run's block IR at every
+	// step boundary so a crashed turn can be recovered (see
+	// agent.Checkpoint and docs/STREAMING.md).
+	Checkpointer agent.Checkpointer
 	// Guard and Metrics are layered on by New (not NewProvider).
 	Guard   *agent.Guard
 	Metrics *agent.Metrics
@@ -96,6 +103,7 @@ func NewProvider(s Settings, d Deps) (agent.Provider, error) {
 		return anthropic.New(anthropic.Options{
 			APIKey: s.AnthropicAPIKey, Model: s.AnthropicModel, BaseURL: s.AnthropicBaseURL,
 			Registry: d.Registry, Config: d.Config, Interceptors: d.Interceptors, Skills: d.Skills,
+			Executor: d.Executor, Checkpointer: d.Checkpointer,
 		}), nil
 	case ProviderOpenAI:
 		if s.OpenAIAPIKey == "" {
@@ -104,6 +112,7 @@ func NewProvider(s Settings, d Deps) (agent.Provider, error) {
 		return openai.New(openai.Options{
 			APIKey: s.OpenAIAPIKey, BaseURL: s.OpenAIBaseURL, Model: s.OpenAIModel,
 			Registry: d.Registry, Config: d.Config, Interceptors: d.Interceptors, Skills: d.Skills,
+			Executor: d.Executor, Checkpointer: d.Checkpointer,
 		}), nil
 	default:
 		return nil, fmt.Errorf("dialogram: unknown provider %q (want %q or %q)", name, ProviderAnthropic, ProviderOpenAI)

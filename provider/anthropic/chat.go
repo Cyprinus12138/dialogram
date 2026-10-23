@@ -111,7 +111,10 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 	}
 
 	for step := 0; step < st.profile.MaxSteps(); step++ {
-		msgs := turnsToMessages(turns)
+		msgs, err := turnsToMessages(turns)
+		if err != nil {
+			return nil, err
+		}
 		lastBreakdown = breakdown(st.sysPrompt, msgs, st.toolSpec)
 		loop.LogBreakdown(p.Name(), "chat", step, lastBreakdown)
 
@@ -128,6 +131,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 		}
 		assistantTurn := responseToTurn(parsed)
 		turns = append(turns, assistantTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 
 		if parsed.StopReason != "tool_use" || !loop.HasToolUse(assistantTurn) {
 			return result(loop.ExtractText(assistantTurn)), nil
@@ -138,6 +142,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 		}
 		trace = append(trace, traces...)
 		turns = append(turns, toolTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 	}
 
 	// Step cap reached with the model still wanting tools: one tool-free
@@ -149,6 +154,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 	cacheRead += scr
 	cacheCreation += scc
 	turns = append(turns, agent.Turn{Role: agent.RoleAssistant, Blocks: []agent.Block{{Type: agent.BlockText, Text: final}}})
+	p.runner.Checkpoint(ctx, in.MessageID, st.profile.MaxSteps()+1, turns[inputLen:])
 	return result(final), nil
 }
 
@@ -157,7 +163,10 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 // wrap-up from the results it already gathered. The nudge is appended to the
 // request only — never persisted into the conversation.
 func (p *Provider) synthesizeFinal(ctx context.Context, st turnState, turns []agent.Turn) (text string, inTok, outTok, cacheRead, cacheCreation int, err error) {
-	msgs := turnsToMessages(turns)
+	msgs, err := turnsToMessages(turns)
+	if err != nil {
+		return "", 0, 0, 0, 0, err
+	}
 	msgs = append(msgs, message{Role: "user", Content: st.profile.Nudge()})
 	body := map[string]any{
 		"model":      p.model,

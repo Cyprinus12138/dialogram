@@ -5,6 +5,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -33,6 +34,12 @@ type Options struct {
 	Config       *agent.Config
 	Interceptors []agent.Interceptor
 	Skills       *agent.SkillLibrary
+	// Executor runs tool calls. nil selects tool.NewLocalExecutor with the
+	// default limits (60 s per call, 64 KiB observation, 8 in parallel).
+	Executor tool.Executor
+	// Checkpointer, when non-nil, receives the run's block IR at every step
+	// boundary (see agent.Checkpoint).
+	Checkpointer agent.Checkpointer
 }
 
 // DefaultModel is used when Options.Model is empty.
@@ -72,6 +79,9 @@ func New(o Options) *Provider {
 	if o.Registry == nil {
 		o.Registry = tool.NewRegistry()
 	}
+	if o.Executor == nil {
+		o.Executor = tool.NewLocalExecutor(o.Registry, tool.LocalExecutorOptions{})
+	}
 	return &Provider{
 		apiKey:    o.APIKey,
 		model:     o.Model,
@@ -82,7 +92,7 @@ func New(o Options) *Provider {
 		reg:       o.Registry,
 		cfg:       o.Config,
 		skills:    o.Skills,
-		runner:    loop.Runner{Cfg: o.Config, Reg: o.Registry, Interceptors: o.Interceptors},
+		runner:    loop.Runner{Cfg: o.Config, Reg: o.Registry, Interceptors: o.Interceptors, Executor: o.Executor, Checkpointer: o.Checkpointer},
 	}
 }
 
@@ -236,13 +246,18 @@ func cachedTools(spec []map[string]any) []map[string]any {
 // turnsToMessages translates the neutral Turn IR into the /v1/messages
 // wire shape. The system prompt is carried separately on the request.
 //
-//   - "user" with a single text block collapses to string Content.
+//   - "user" with a single text block collapses to string Content; any
+//     other mix of text and image blocks is a content array.
 //   - "assistant" always uses structured content so text and tool_use
 //     blocks round-trip correctly.
 //   - "tool" becomes a user-role message whose content is a list of
 //     tool_result blocks — Anthropic's convention for replying to a
 //     preceding assistant tool_use turn. Only model_observation is sent.
-func turnsToMessages(turns []agent.Turn) []message {
+//
+// An image block outside a user turn, or one that fails loop.CheckImage,
+// is an error: the request would be rejected upstream with a less useful
+// message.
+func turnsToMessages(turns []agent.Turn) ([]message, error) {
 	out := make([]message, 0, len(turns))
 	for _, t := range turns {
 		switch t.Role {
@@ -253,16 +268,23 @@ func turnsToMessages(turns []agent.Turn) []message {
 			}
 			content := make([]map[string]any, 0, len(t.Blocks))
 			for _, b := range t.Blocks {
-				if b.Type != agent.BlockText {
-					continue
+				switch b.Type {
+				case agent.BlockText:
+					content = append(content, map[string]any{"type": "text", "text": b.Text})
+				case agent.BlockImage:
+					if err := loop.CheckImage(t.Role, b); err != nil {
+						return nil, fmt.Errorf("anthropic: %w", err)
+					}
+					content = append(content, imageContent(b))
 				}
-				content = append(content, map[string]any{"type": "text", "text": b.Text})
 			}
 			out = append(out, message{Role: "user", Content: content})
 		case agent.RoleAssistant:
 			content := make([]map[string]any, 0, len(t.Blocks))
 			for _, b := range t.Blocks {
 				switch b.Type {
+				case agent.BlockImage:
+					return nil, fmt.Errorf("anthropic: %w", loop.CheckImage(t.Role, b))
 				case agent.BlockText:
 					content = append(content, map[string]any{"type": "text", "text": b.Text})
 				case agent.BlockToolUse:
@@ -284,6 +306,9 @@ func turnsToMessages(turns []agent.Turn) []message {
 		case agent.RoleTool:
 			content := make([]map[string]any, 0, len(t.Blocks))
 			for _, b := range t.Blocks {
+				if b.Type == agent.BlockImage {
+					return nil, fmt.Errorf("anthropic: %w", loop.CheckImage(t.Role, b))
+				}
 				if b.Type != agent.BlockToolResult {
 					continue
 				}
@@ -297,7 +322,18 @@ func turnsToMessages(turns []agent.Turn) []message {
 			out = append(out, message{Role: "user", Content: content})
 		}
 	}
-	return out
+	return out, nil
+}
+
+// imageContent renders a validated image block as a Messages API image
+// part: a base64 source for inline data, a url source otherwise.
+func imageContent(b agent.Block) map[string]any {
+	if b.URL != "" {
+		return map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": b.URL}}
+	}
+	return map[string]any{"type": "image", "source": map[string]any{
+		"type": "base64", "media_type": b.MediaType, "data": b.Data,
+	}}
 }
 
 // responseToTurn converts a Messages response into an assistant Turn. The

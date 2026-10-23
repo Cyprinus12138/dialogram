@@ -49,7 +49,10 @@ func jsonResp(body string) *http.Response {
 // ---------- translators ----------
 
 func TestTurnsToMessages(t *testing.T) {
-	msgs := turnsToMessages(fixtureTurns)
+	msgs, err := turnsToMessages(fixtureTurns)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(msgs) != 3 {
 		t.Fatalf("want 3 msgs, got %d", len(msgs))
 	}
@@ -352,5 +355,68 @@ func TestNew_Defaults(t *testing.T) {
 	p := New(Options{APIKey: "k"})
 	if p.Model() != DefaultModel || p.Name() != "anthropic" || p.baseURL != "https://api.anthropic.com" || p.maxTokens != loop.DefaultMaxTokens {
 		t.Fatalf("defaults wrong: %+v", p)
+	}
+}
+
+// ---------- image blocks ----------
+
+func TestTurnsToMessages_Image(t *testing.T) {
+	msgs, err := turnsToMessages([]agent.Turn{
+		agent.UserTurnBlocks(agent.TextBlock("look"), agent.ImageBlock("image/jpeg", "QUJD")),
+		{Role: agent.RoleAssistant, Blocks: []agent.Block{agent.TextBlock("a cat")}},
+		agent.UserTurnBlocks(agent.ImageURLBlock("https://example.com/a.png")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := msgs[0].Content.([]map[string]any)
+	if len(content) != 2 || content[0]["type"] != "text" || content[0]["text"] != "look" || content[1]["type"] != "image" {
+		t.Fatalf("mixed user content = %#v", msgs[0].Content)
+	}
+	if src, _ := content[1]["source"].(map[string]any); src["type"] != "base64" || src["media_type"] != "image/jpeg" || src["data"] != "QUJD" {
+		t.Errorf("base64 source = %#v", src)
+	}
+	byURL, _ := msgs[2].Content.([]map[string]any)
+	if len(byURL) != 1 || byURL[0]["type"] != "image" {
+		t.Fatalf("url user content = %#v", msgs[2].Content)
+	}
+	if src, _ := byURL[0]["source"].(map[string]any); src["type"] != "url" || src["url"] != "https://example.com/a.png" || src["media_type"] != nil {
+		t.Errorf("url source = %#v", src)
+	}
+	// Text-only user turns keep their shape: one block collapses to a
+	// string, several stay text blocks.
+	plain, _ := turnsToMessages([]agent.Turn{
+		agent.UserTurnBlocks(agent.TextBlock("hi")),
+		agent.UserTurnBlocks(agent.TextBlock("a"), agent.TextBlock("b")),
+	})
+	if plain[0].Content != "hi" {
+		t.Errorf("single text block must stay string content: %#v", plain[0].Content)
+	}
+	if two, _ := plain[1].Content.([]map[string]any); len(two) != 2 || two[0]["type"] != "text" || two[1]["text"] != "b" {
+		t.Errorf("multi text blocks = %#v", plain[1].Content)
+	}
+}
+
+func TestTurnsToMessages_ImageErrors(t *testing.T) {
+	user := func(b agent.Block) []agent.Turn { return []agent.Turn{agent.UserTurnBlocks(agent.TextBlock("x"), b)} }
+	cases := []struct {
+		name  string
+		turns []agent.Turn
+		want  string
+	}{
+		{"assistant turn", []agent.Turn{{Role: agent.RoleAssistant, Blocks: []agent.Block{agent.ImageBlock("image/png", "QUJD")}}}, "only valid in user turns"},
+		{"tool turn", []agent.Turn{{Role: agent.RoleTool, Blocks: []agent.Block{agent.ImageBlock("image/png", "QUJD")}}}, "only valid in user turns"},
+		{"unsupported media type", user(agent.ImageBlock("image/bmp", "QUJD")), "not supported"},
+		{"both data and url", user(agent.Block{Type: agent.BlockImage, MediaType: "image/png", Data: "QUJD", URL: "https://example.com/a.png"}), "both"},
+		{"neither data nor url", user(agent.Block{Type: agent.BlockImage}), "neither"},
+		{"inline without media type", user(agent.ImageBlock("", "QUJD")), "needs a media type"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := turnsToMessages(c.turns)
+			if err == nil || !strings.HasPrefix(err.Error(), "anthropic: ") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+		})
 	}
 }

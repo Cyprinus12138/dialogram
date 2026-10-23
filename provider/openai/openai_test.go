@@ -93,8 +93,17 @@ func newProvider(url string, reg *tool.Registry, cfg *agent.Config, ics ...agent
 
 // ---------- translators ----------
 
+func mustMessages(t *testing.T, sysPrompt string, turns []agent.Turn) []message {
+	t.Helper()
+	msgs, err := turnsToMessages(sysPrompt, turns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msgs
+}
+
 func TestTurnsToMessages_PrependsSystemAndExpandsTools(t *testing.T) {
-	msgs := turnsToMessages("SYS", fixtureTurns)
+	msgs := mustMessages(t, "SYS", fixtureTurns)
 	if len(msgs) != 4 || msgs[0].Role != "system" || msgs[0].Content != "SYS" || msgs[1].Content != "hi" {
 		t.Fatalf("msgs = %#v", msgs)
 	}
@@ -106,13 +115,13 @@ func TestTurnsToMessages_PrependsSystemAndExpandsTools(t *testing.T) {
 		t.Fatalf("tool msg = %#v", msgs[3])
 	}
 	// Assistant with only tool_calls has nil content (OpenAI rejects "").
-	only := turnsToMessages("", []agent.Turn{{Role: agent.RoleAssistant, Blocks: []agent.Block{{Type: agent.BlockToolUse, ToolUseID: "x", ToolName: "t"}}}})
+	only := mustMessages(t, "", []agent.Turn{{Role: agent.RoleAssistant, Blocks: []agent.Block{{Type: agent.BlockToolUse, ToolUseID: "x", ToolName: "t"}}}})
 	if only[0].Content != nil || only[0].ToolCalls[0].Function.Arguments != "{}" {
 		t.Fatalf("content should be nil and args {}: %#v", only[0])
 	}
 	// Multiple tool results expand to separate messages in order; only
 	// model_observation reaches the wire.
-	multi := turnsToMessages("", []agent.Turn{{Role: agent.RoleTool, Blocks: []agent.Block{
+	multi := mustMessages(t, "", []agent.Turn{{Role: agent.RoleTool, Blocks: []agent.Block{
 		{Type: agent.BlockToolResult, ToolUseID: "a", ToolName: "t1", ToolResult: json.RawMessage(`{"model_observation":{"x":1},"runtime_state":{"rows":[1,2]}}`)},
 		{Type: agent.BlockToolResult, ToolUseID: "b", ToolName: "t2", ToolResult: json.RawMessage(`{"y":2}`)},
 	}}})
@@ -444,5 +453,57 @@ func TestChatStream_RetryPolicy(t *testing.T) {
 	p = newProvider(bad.URL, tool.NewRegistry(), nil)
 	if err := p.ChatStream(context.Background(), agent.ChatInput{Messages: []agent.ChatMessage{{Role: "user", Content: "hi"}}}, func(agent.StreamEvent) {}); err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("400 must surface, got %v", err)
+	}
+}
+
+// ---------- image blocks ----------
+
+func TestTurnsToMessages_Image(t *testing.T) {
+	msgs := mustMessages(t, "SYS", []agent.Turn{
+		agent.UserTurnBlocks(agent.TextBlock("look"), agent.ImageBlock("image/jpeg", "QUJD")),
+		agent.UserTurnBlocks(agent.ImageURLBlock("https://example.com/a.png"), agent.TextBlock("and this")),
+	})
+	parts, _ := msgs[1].Content.([]map[string]any)
+	if len(parts) != 2 || parts[0]["type"] != "text" || parts[0]["text"] != "look" || parts[1]["type"] != "image_url" {
+		t.Fatalf("mixed user content = %#v", msgs[1].Content)
+	}
+	if img, _ := parts[1]["image_url"].(map[string]any); img["url"] != "data:image/jpeg;base64,QUJD" {
+		t.Errorf("inline image part = %#v", parts[1])
+	}
+	byURL, _ := msgs[2].Content.([]map[string]any)
+	if len(byURL) != 2 || byURL[0]["type"] != "image_url" || byURL[1]["text"] != "and this" {
+		t.Fatalf("url user content = %#v", msgs[2].Content)
+	}
+	if img, _ := byURL[0]["image_url"].(map[string]any); img["url"] != "https://example.com/a.png" {
+		t.Errorf("url image part = %#v", byURL[0])
+	}
+	// Text-only user turns still concatenate into string content.
+	plain := mustMessages(t, "", []agent.Turn{agent.UserTurnBlocks(agent.TextBlock("a"), agent.TextBlock("b"))})
+	if plain[0].Content != "ab" {
+		t.Errorf("text-only turn must stay string content: %#v", plain[0].Content)
+	}
+}
+
+func TestTurnsToMessages_ImageErrors(t *testing.T) {
+	user := func(b agent.Block) []agent.Turn { return []agent.Turn{agent.UserTurnBlocks(agent.TextBlock("x"), b)} }
+	cases := []struct {
+		name  string
+		turns []agent.Turn
+		want  string
+	}{
+		{"assistant turn", []agent.Turn{{Role: agent.RoleAssistant, Blocks: []agent.Block{agent.ImageBlock("image/png", "QUJD")}}}, "only valid in user turns"},
+		{"tool turn", []agent.Turn{{Role: agent.RoleTool, Blocks: []agent.Block{agent.ImageBlock("image/png", "QUJD")}}}, "only valid in user turns"},
+		{"unsupported media type", user(agent.ImageBlock("image/bmp", "QUJD")), "not supported"},
+		{"both data and url", user(agent.Block{Type: agent.BlockImage, MediaType: "image/png", Data: "QUJD", URL: "https://example.com/a.png"}), "both"},
+		{"neither data nor url", user(agent.Block{Type: agent.BlockImage}), "neither"},
+		{"inline without media type", user(agent.ImageBlock("", "QUJD")), "needs a media type"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := turnsToMessages("", c.turns)
+			if err == nil || !strings.HasPrefix(err.Error(), "openai: ") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+		})
 	}
 }

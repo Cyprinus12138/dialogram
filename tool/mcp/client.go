@@ -21,9 +21,16 @@
 // peer. Descriptions reach the model as part of the tool spec, and results
 // reach it as tool_result content, so a remote server is in a position to
 // inject instructions. Treat results from servers you do not operate as
-// untrusted content. A provenance flag on the result envelope
-// (Envelope.Provenance) is landing on another branch; RegisterOptions will
-// grow an Untrusted switch that sets it once the two merge.
+// untrusted content: register them with RegisterOptions.Untrusted, which
+// marks every successful result ProvenanceUntrusted so the loop fences it
+// as data rather than instructions. Soft failures (MCP_TOOL_ERROR,
+// UPSTREAM_TIMEOUT) stay bare so the loop's error_code handling is
+// unchanged.
+//
+// Servers also describe their tools with behaviour hints. Register maps
+// them onto tool.Annotations so agent.PolicyInterceptor can pause or deny
+// on them; see RegisterOptions for the mapping rules, in particular what
+// an unannotated tool gets.
 //
 // # Result mapping
 //
@@ -40,6 +47,10 @@
 //     the bytes never enter the model context. Embedded resources keep
 //     their text when they carry text and are otherwise marked omitted;
 //     resource links are forwarded as metadata (uri, name, media_type).
+//
+// With RegisterOptions.Untrusted every value above except a soft failure
+// is wrapped in tool.UntrustedEnvelope, so tool.ProjectModelObservation
+// fences it before the model reads it.
 //
 // A call that outruns Options.Timeout returns
 // tool.Soft(tool.ErrorCodeUpstreamTimeout, …), which is retryable. A call
@@ -156,14 +167,22 @@ func (c *Client) Instructions() string { return c.instructions }
 // Tools lists the server's tools (following pagination) and converts each
 // into a tool.Tool: Name and Description pass through, Label is the
 // server's display title when it sent one, Schema is the MCP inputSchema
-// as a map (or tool.Obj(nil) when absent), and Fn forwards to tools/call.
-// The returned tools are fresh values; renaming them (as Register does)
-// does not affect the name sent on the wire.
+// as a map (or tool.Obj(nil) when absent), Annotations carry the hints
+// the server declared (see Register for the mapping; undeclared stays
+// zero), and Fn forwards to tools/call. The returned tools are fresh
+// values; renaming them (as Register does) does not affect the name sent
+// on the wire.
 //
 // Each call re-lists, so a server that changes its tool set is picked up
 // by calling Tools again. The listing also refreshes what Annotations
 // reports.
 func (c *Client) Tools(ctx context.Context) ([]*tool.Tool, error) {
+	return c.list(ctx, false)
+}
+
+// list is Tools with the per-registration untrusted switch threaded into
+// each Fn.
+func (c *Client) list(ctx context.Context, untrusted bool) ([]*tool.Tool, error) {
 	if c.isClosed() {
 		return nil, ErrClosed
 	}
@@ -187,7 +206,7 @@ func (c *Client) Tools(ctx context.Context) ([]*tool.Tool, error) {
 
 	out := make([]*tool.Tool, 0, len(listed))
 	for _, t := range listed {
-		out = append(out, c.convert(t))
+		out = append(out, c.convert(t, untrusted))
 	}
 	return out, nil
 }
@@ -199,9 +218,8 @@ func (c *Client) Tools(ctx context.Context) ([]*tool.Tool, error) {
 // when ReadOnly is false. They are hints, not guarantees: a server can say
 // anything about itself.
 //
-// TODO: map Hints onto tool.Annotations once that type lands from its own
-// branch, so interceptors (approval lists, read-only profiles) can act on
-// them without importing this package.
+// Register maps Hints onto tool.Annotations so interceptors can act on
+// them without importing this package; see RegisterOptions for the rules.
 type Hints struct {
 	// Title is the human-readable title from the annotations block.
 	Title string
@@ -252,21 +270,24 @@ func (c *Client) isClosed() bool {
 	return c.closed
 }
 
-func (c *Client) convert(t *sdk.Tool) *tool.Tool {
+func (c *Client) convert(t *sdk.Tool, untrusted bool) *tool.Tool {
 	name := t.Name // wire name; the tool.Tool may be renamed by Register
 	return &tool.Tool{
 		Name:        name,
 		Description: t.Description,
 		Label:       displayTitle(t),
 		Schema:      inputSchema(t.InputSchema),
+		Annotations: annotationsFor(hintsOf(t.Annotations)),
 		Fn: func(ctx context.Context, input json.RawMessage) (any, error) {
-			return c.call(ctx, name, input)
+			return c.call(ctx, name, input, untrusted)
 		},
 	}
 }
 
 // call forwards one tools/call and maps the outcome; see the package doc.
-func (c *Client) call(parent context.Context, name string, input json.RawMessage) (any, error) {
+// With untrusted set, a successful value is wrapped in
+// tool.UntrustedEnvelope; soft failures are returned bare.
+func (c *Client) call(parent context.Context, name string, input json.RawMessage, untrusted bool) (any, error) {
 	if c.isClosed() {
 		return nil, ErrClosed
 	}
@@ -292,7 +313,11 @@ func (c *Client) call(parent context.Context, name string, input json.RawMessage
 			return nil, fmt.Errorf("mcp: %s: call %s: %w", c.name, name, err)
 		}
 	}
-	return mapResult(res), nil
+	v, soft := mapResult(res)
+	if untrusted && !soft {
+		return tool.UntrustedEnvelope(v), nil
+	}
+	return v, nil
 }
 
 // displayTitle follows the specification's display-name precedence:
@@ -331,6 +356,31 @@ func inputSchema(v any) map[string]any {
 		return tool.Obj(nil)
 	}
 	return m
+}
+
+// annotationsFor maps declared hints onto tool.Annotations. An undeclared
+// tool gets the zero value — dialogram's all-false default, which
+// agent.PolicyInterceptor treats as allowed — rather than MCP's
+// destructive/open-world defaults, so a server that simply did not
+// annotate is not paused or denied on every call (RegisterOptions.
+// AssumeOpenWorld is the opt-in for the cautious reading). Within a
+// declared block the MCP defaults already applied by hintsOf stand, except
+// that Destructive is cleared on a read-only tool: the specification makes
+// destructiveHint meaningful only when readOnlyHint is false.
+func annotationsFor(h Hints) tool.Annotations {
+	if !h.Declared {
+		return tool.Annotations{}
+	}
+	a := tool.Annotations{
+		ReadOnly:    h.ReadOnly,
+		Destructive: h.Destructive,
+		Idempotent:  h.Idempotent,
+		OpenWorld:   h.OpenWorld,
+	}
+	if a.ReadOnly {
+		a.Destructive = false
+	}
+	return a
 }
 
 func hintsOf(a *sdk.ToolAnnotations) Hints {

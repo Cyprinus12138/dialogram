@@ -20,22 +20,24 @@ const (
 	partUnknown      = "unknown"
 )
 
-// mapResult turns a tools/call result into the value Fn returns.
-func mapResult(res *sdk.CallToolResult) any {
+// mapResult turns a tools/call result into the value Fn returns. soft
+// reports that the value is a soft failure (IsError), which callers must
+// leave bare rather than wrap in an envelope.
+func mapResult(res *sdk.CallToolResult) (v any, soft bool) {
 	if res == nil {
-		return map[string]any{keyText: ""}
+		return map[string]any{keyText: ""}, false
 	}
 	if res.IsError {
 		msg := joinText(res.Content)
 		if msg == "" {
 			msg = "the tool reported an error without a message"
 		}
-		return tool.Soft(ErrorCodeToolError, msg)
+		return tool.Soft(ErrorCodeToolError, msg), true
 	}
 	if res.StructuredContent != nil {
-		return res.StructuredContent
+		return res.StructuredContent, false
 	}
-	return contentObject(res.Content)
+	return contentObject(res.Content), false
 }
 
 // joinText concatenates the text parts with newlines, skipping the rest.

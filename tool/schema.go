@@ -9,6 +9,15 @@ const (
 	ErrorCodeInvalidInput    = "INVALID_INPUT"
 	ErrorCodeDenied          = "DENIED"
 	ErrorCodeHardFailure     = "HARD_FAILURE"
+	// ErrorCodeToolTimeout is stamped by LocalExecutor when a tool exceeds
+	// its per-call deadline (LocalExecutorOptions.Timeout / Tool.Timeout).
+	ErrorCodeToolTimeout = "TOOL_TIMEOUT"
+	// ErrorCodeToolPanic is stamped by LocalExecutor when a tool panics; the
+	// stack is logged server-side and the model sees a soft failure.
+	ErrorCodeToolPanic = "TOOL_PANIC"
+	// ErrorCodeRunInterrupted is stamped by agent.CloseDangling on a
+	// tool_use whose run died before its result was recorded.
+	ErrorCodeRunInterrupted = "RUN_INTERRUPTED"
 )
 
 // Source is the provenance block a data tool attaches to its result so the

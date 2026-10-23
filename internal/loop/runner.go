@@ -2,18 +2,35 @@ package loop
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
 	"github.com/Cyprinus12138/dialogram/agent"
 	"github.com/Cyprinus12138/dialogram/tool"
 )
 
 // Runner bundles the provider-neutral dependencies a wire adapter needs to
-// handle the tool half of a step: the pause policy, the registry and the
-// interceptor chain.
+// handle the tool half of a step: the pause policy, the registry, the
+// interceptor chain, the executor tools run through and the checkpointer
+// that sees the IR at every step boundary.
 type Runner struct {
 	Cfg          *agent.Config
 	Reg          *tool.Registry
 	Interceptors []agent.Interceptor
+	// Executor runs the surviving tool calls of a step. nil selects
+	// tool.NewLocalExecutor over Reg with default limits.
+	Executor tool.Executor
+	// Checkpointer, when non-nil, receives the run's turns at every step
+	// boundary through Checkpoint.
+	Checkpointer agent.Checkpointer
+}
+
+// executor returns the configured Executor or the default over Reg.
+func (r Runner) executor() tool.Executor {
+	if r.Executor != nil {
+		return r.Executor
+	}
+	return tool.NewLocalExecutor(r.Reg, tool.LocalExecutorOptions{})
 }
 
 // HasToolUse reports whether an assistant turn requests any tool.
@@ -44,12 +61,13 @@ func HasToolUse(t agent.Turn) bool {
 // pause event (streaming) or return the text so far (non-streaming).
 func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit agent.EmitFn) (toolTurn agent.Turn, traces []agent.ToolTrace, pause *agent.StreamEvent) {
 	isPause := r.Cfg.IsPauseTool
+	exec := r.executor()
 	pauseBlocks, regular := agent.SplitPauseTurn(assistantTurn, isPause)
 	if len(pauseBlocks) > 0 && len(regular) > 0 {
 		if emit != nil {
 			EmitToolCalls(emit, r.Reg, regular)
 		}
-		results, pb, reason := Dispatch(ctx, r.Interceptors, r.Reg, regular)
+		results, pb, reason := Dispatch(ctx, r.Interceptors, r.Reg, exec, regular)
 		if pb != nil {
 			ev := ApprovalPauseEvent(pb, reason)
 			return agent.Turn{}, nil, &ev
@@ -68,7 +86,7 @@ func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit 
 	if emit != nil {
 		EmitToolCalls(emit, r.Reg, assistantTurn.Blocks)
 	}
-	results, pb, reason := Dispatch(ctx, r.Interceptors, r.Reg, assistantTurn.Blocks)
+	results, pb, reason := Dispatch(ctx, r.Interceptors, r.Reg, exec, assistantTurn.Blocks)
 	if pb != nil {
 		ev := ApprovalPauseEvent(pb, reason)
 		return agent.Turn{}, nil, &ev
@@ -77,4 +95,27 @@ func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit 
 		EmitToolResults(emit, results)
 	}
 	return ToolTurn(results), Traces(results), nil
+}
+
+// Checkpoint hands the turns this run has produced so far to the
+// Checkpointer, if one is configured. Providers call it after every
+// assistant turn is finalised and again after the tool turn is appended.
+// step is 1-based; Pending is derived from run (tool_use blocks without a
+// tool_result), so it holds the assistant turn's calls at the first
+// boundary and nothing at the second. A Save error is logged, never
+// returned — checkpointing is a durability aid, not a correctness gate.
+func (r Runner) Checkpoint(ctx context.Context, messageID string, step int, run []agent.Turn) {
+	if r.Checkpointer == nil {
+		return
+	}
+	cp := agent.Checkpoint{
+		MessageID: messageID,
+		Step:      step,
+		Turns:     append([]agent.Turn(nil), run...),
+		Pending:   agent.DanglingToolUses(run),
+		At:        time.Now(),
+	}
+	if err := r.Checkpointer.Save(ctx, cp); err != nil {
+		slog.Warn("checkpoint save failed", "message_id", messageID, "step", step, "err", err)
+	}
 }

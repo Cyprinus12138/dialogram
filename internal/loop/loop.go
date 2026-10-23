@@ -45,15 +45,22 @@ type Dispatched struct {
 }
 
 // Dispatch runs the interceptor chain on every tool_use block, then
-// executes the surviving tools concurrently and waits for all to finish.
-// Results preserve the original block order so callers emit/trace in the
-// model's intended sequence.
+// executes the surviving tools concurrently through exec and waits for all
+// to finish. Results preserve the original block order so callers
+// emit/trace in the model's intended sequence.
+//
+// A nil exec selects tool.NewLocalExecutor over reg with default limits.
+// When exec implements tool.ConcurrencyLimiter, at most that many calls of
+// this step run at once; the rest queue. Every surviving block gets a
+// result — an executor error becomes a HARD_FAILURE body, and a call still
+// queued when ctx ends is failed the same way rather than dropped — so the
+// tool turn is always complete.
 //
 // If any interceptor decides InterceptPause, Dispatch returns the offending
 // block and reason with nil results; the caller short-circuits the step.
 // Tools are assumed independent — a tool that needs a prior tool's result
 // in the same turn has to be issued by the model in a separate turn anyway.
-func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.Registry, blocks []agent.Block) (results []Dispatched, pauseBlock *agent.Block, pauseReason string) {
+func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.Registry, exec tool.Executor, blocks []agent.Block) (results []Dispatched, pauseBlock *agent.Block, pauseReason string) {
 	type job struct {
 		block   agent.Block
 		rawJSON string
@@ -79,6 +86,20 @@ func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.R
 			jobs = append(jobs, job{block: b, rawJSON: raw})
 		}
 	}
+	if exec == nil {
+		exec = tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{})
+	}
+	var store tool.ArtifactStore
+	if reg != nil {
+		store = reg.Artifacts()
+	}
+	limit := len(jobs)
+	if cl, ok := exec.(tool.ConcurrencyLimiter); ok {
+		if n := cl.MaxConcurrency(); n > 0 && n < limit {
+			limit = n
+		}
+	}
+	sem := make(chan struct{}, limit)
 	results = make([]Dispatched, len(jobs))
 	var wg sync.WaitGroup
 	for i := range jobs {
@@ -92,8 +113,21 @@ func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.R
 		wg.Add(1)
 		go func(i int, j job) {
 			defer wg.Done()
-			callCtx := tool.WithCallContext(ctx, j.block.ToolUseID, reg.Artifacts())
-			out, err := reg.Call(callCtx, j.block.ToolName, j.rawJSON)
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i].Out = HardFailureJSON(ctx.Err())
+				return
+			}
+			defer func() { <-sem }()
+			// Do not start new work on a context that ended while this
+			// call was queued; fail it the same way.
+			if err := ctx.Err(); err != nil {
+				results[i].Out = HardFailureJSON(err)
+				return
+			}
+			callCtx := tool.WithCallContext(ctx, j.block.ToolUseID, store)
+			out, err := exec.Execute(callCtx, tool.Call{ToolUseID: j.block.ToolUseID, Name: j.block.ToolName, Input: json.RawMessage(j.rawJSON)})
 			if err != nil {
 				out = HardFailureJSON(err)
 			}
@@ -207,6 +241,28 @@ func ApprovalPauseEvent(b *agent.Block, reason string) agent.StreamEvent {
 	}
 }
 
+// CheckImage validates an image block for the turn role it sits in. Both
+// adapters apply the same rule, so a conversation one provider accepts is
+// never rejected by the other on resume: images are valid in user turns
+// only, carry exactly one of Data or URL, and an inline image names one of
+// the media types agent.IsImageMediaType accepts.
+func CheckImage(role string, b agent.Block) error {
+	if role != agent.RoleUser {
+		return fmt.Errorf("image block in %s turn: images are only valid in user turns", role)
+	}
+	switch {
+	case b.Data != "" && b.URL != "":
+		return errors.New("image block sets both data and url: set exactly one")
+	case b.Data == "" && b.URL == "":
+		return errors.New("image block sets neither data nor url: set exactly one")
+	case b.Data != "" && b.MediaType == "":
+		return errors.New("inline image block needs a media type (image/png, image/jpeg, image/gif or image/webp)")
+	case b.MediaType != "" && !agent.IsImageMediaType(b.MediaType):
+		return fmt.Errorf("image block media type %q is not supported (want image/png, image/jpeg, image/gif or image/webp)", b.MediaType)
+	}
+	return nil
+}
+
 // ExtractText concatenates the text blocks of a turn.
 func ExtractText(t agent.Turn) string {
 	var out strings.Builder
@@ -218,6 +274,10 @@ func ExtractText(t agent.Turn) string {
 	return out.String()
 }
 
+// BackoffBase is the unit WaitBackoff scales: attempt n waits
+// BackoffBase << n. Tests shrink it so a retry scenario does not sleep.
+var BackoffBase = 200 * time.Millisecond
+
 // WaitBackoff sleeps for an exponentially increasing duration based on the
 // attempt number, or returns early if ctx is cancelled. attempt=0 is a
 // no-op — callers use this *between* retries.
@@ -225,7 +285,7 @@ func WaitBackoff(ctx context.Context, attempt int) error {
 	if attempt <= 0 {
 		return nil
 	}
-	d := time.Duration(200*(1<<attempt)) * time.Millisecond
+	d := BackoffBase << attempt
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

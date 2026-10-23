@@ -102,7 +102,10 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 	}
 
 	for step := 0; step < st.profile.MaxSteps(); step++ {
-		msgs := turnsToMessages(st.sysPrompt, turns)
+		msgs, err := turnsToMessages(st.sysPrompt, turns)
+		if err != nil {
+			return nil, err
+		}
 		lastBreakdown = breakdown(msgs, st.toolSpecs)
 		loop.LogBreakdown(p.Name(), "chat", step, lastBreakdown)
 
@@ -116,6 +119,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 		choice := parsed.Choices[0]
 		assistantTurn := responseToTurn(choice.Message.Content, choice.Message.ToolCalls)
 		turns = append(turns, assistantTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 
 		if len(choice.Message.ToolCalls) == 0 {
 			return result(choice.Message.Content), nil
@@ -126,6 +130,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 		}
 		trace = append(trace, traces...)
 		turns = append(turns, toolTurn)
+		p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
 	}
 
 	final, _, _, scr, err := p.synthesizeFinal(ctx, st, turns)
@@ -134,6 +139,7 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 	}
 	cacheRead += scr
 	turns = append(turns, agent.Turn{Role: agent.RoleAssistant, Blocks: []agent.Block{{Type: agent.BlockText, Text: final}}})
+	p.runner.Checkpoint(ctx, in.MessageID, st.profile.MaxSteps()+1, turns[inputLen:])
 	return result(final), nil
 }
 
@@ -141,7 +147,10 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 // step cap. Omitting the tools forces a grounded wrap-up from the results
 // already gathered. The nudge is request-only, never persisted.
 func (p *Provider) synthesizeFinal(ctx context.Context, st turnState, turns []agent.Turn) (text string, inTok, outTok, cacheRead int, err error) {
-	msgs := turnsToMessages(st.sysPrompt, turns)
+	msgs, err := turnsToMessages(st.sysPrompt, turns)
+	if err != nil {
+		return "", 0, 0, 0, err
+	}
 	msgs = append(msgs, message{Role: "user", Content: st.profile.Nudge()})
 	body, _ := json.Marshal(map[string]any{
 		"model":      p.model,

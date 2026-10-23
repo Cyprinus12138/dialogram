@@ -54,7 +54,7 @@ func TestDispatch_RunsInParallel(t *testing.T) {
 		reg.Register(sleepyTool(n, per))
 	}
 	start := time.Now()
-	results, pause, _ := Dispatch(context.Background(), nil, reg, toolUseBlocks("a", "b", "c"))
+	results, pause, _ := Dispatch(context.Background(), nil, reg, nil, toolUseBlocks("a", "b", "c"))
 	elapsed := time.Since(start)
 	if pause != nil || len(results) != 3 {
 		t.Fatalf("results=%d pause=%v", len(results), pause)
@@ -72,7 +72,7 @@ func TestDispatch_PreservesOrderWithDeny(t *testing.T) {
 		reg.Register(sleepyTool(n, 0))
 	}
 	ic := fakeInterceptor{deny: map[string]string{"deny_b": "nope"}}
-	results, pause, _ := Dispatch(context.Background(), []agent.Interceptor{ic}, reg, toolUseBlocks("allow_a", "deny_b", "allow_c"))
+	results, pause, _ := Dispatch(context.Background(), []agent.Interceptor{ic}, reg, nil, toolUseBlocks("allow_a", "deny_b", "allow_c"))
 	if pause != nil {
 		t.Fatal("unexpected pause")
 	}
@@ -89,7 +89,7 @@ func TestDispatch_PauseShortCircuits(t *testing.T) {
 	reg := tool.NewRegistry()
 	reg.Register(sleepyTool("gated", 0))
 	ic := fakeInterceptor{pause: map[string]string{"gated": "needs approval"}}
-	results, pause, reason := Dispatch(context.Background(), []agent.Interceptor{ic}, reg, toolUseBlocks("gated"))
+	results, pause, reason := Dispatch(context.Background(), []agent.Interceptor{ic}, reg, nil, toolUseBlocks("gated"))
 	if pause == nil || pause.ToolName != "gated" || reason != "needs approval" || results != nil {
 		t.Fatalf("pause=%v reason=%q results=%v", pause, reason, results)
 	}
@@ -104,7 +104,7 @@ func TestDispatch_HardFailureAndUnknownTool(t *testing.T) {
 	reg.Register(&tool.Tool{Name: "boom", Schema: tool.Obj(nil), Fn: func(context.Context, json.RawMessage) (any, error) {
 		return nil, errors.New("kaboom")
 	}})
-	results, _, _ := Dispatch(context.Background(), nil, reg, toolUseBlocks("boom", "missing"))
+	results, _, _ := Dispatch(context.Background(), nil, reg, nil, toolUseBlocks("boom", "missing"))
 	for _, r := range results {
 		if !strings.Contains(r.Out, tool.ErrorCodeHardFailure) {
 			t.Errorf("%s: expected HARD_FAILURE body, got %s", r.Block.ToolName, r.Out)

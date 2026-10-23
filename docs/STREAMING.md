@@ -206,6 +206,62 @@ an unanswered message. A `visibilitychange` listener that aborts the fetch
 when the tab returns after a few seconds hidden forces an immediate
 reconnect rather than waiting for the OS to notice a dead socket.
 
+## Crash recovery: step checkpoints
+
+The stream buffer holds the *events* of a turn; it does not hold the
+conversation *state*. The block IR of the assistant and tool turns used to
+reach the application only through `Options.OnFinish`, so a process that
+died mid-turn — a deploy, an OOM kill, a lost node — left the client with
+a replayable half-stream and the application with nothing to continue
+from.
+
+`agent.Checkpointer` closes that gap. When one is configured
+(`dialogram.Deps.Checkpointer`, or `Options.Checkpointer` on either
+provider), the loop calls `Save` at every step boundary:
+
+1. after an assistant turn is finalised — `Pending` holds its `tool_use`
+   blocks, so a crash during tool execution is recoverable;
+2. after the matching tool turn is appended — `Pending` is empty.
+
+Each `agent.Checkpoint` carries the `MessageID` (set `ChatInput.MessageID`
+to the id the handler gives the `Producer`), the 1-based `Step`, the
+`Turns` this run has produced so far, `Pending` and a timestamp. Only the
+latest checkpoint per message id matters: `agent.MemCheckpointer` keeps
+exactly that for tests and the example, and a production implementation
+is one upsert keyed by message id. A `Save` error is logged and never
+fails the run.
+
+Recovery after a crash is the application's job, and it is short:
+
+```go
+cp, ok := checkpoints.Load(msgID)          // the last boundary reached
+if ok {
+    turns := cfg.CloseDangling(cp.Turns)   // pair any unanswered tool_use
+    conv.Turns = append(conv.Turns, turns...)
+    persist(conv)
+    checkpoints.Delete(msgID)
+}
+```
+
+`CloseDangling` appends a synthetic `tool_result` with
+`error_code: "RUN_INTERRUPTED"` for every `tool_use` that never received a
+result, so the conversation is well-formed for either provider on the next
+request — both wire formats reject an unanswered call. Pause tools
+(`request_user_input` and friends, plus `Config.PauseTools`) are left
+pending: an unanswered question is state to resume, not a lost result.
+
+The client meanwhile resumes from the buffer as usual. With Redis the
+events survive the restart and the owner flag stops a duplicate producer;
+the terminal frame never arrived, so the application should finish the
+buffer (`Store.Append` an `error` or `done` frame, then `Store.Finish`)
+once it has recovered the conversation, or launch a continuation turn from
+it with `Handler.Launch` and let the client tail that.
+
+Durable-execution engines (Temporal, DBOS and the like) plug in through
+the same interface: a `Checkpointer` that records each boundary as a
+workflow step gives the engine the state it replays from, with no change
+to the loop.
+
 ## Failure matrix
 
 | Failure                         | Recoverable? | Mechanism                                         |
@@ -217,7 +273,8 @@ reconnect rather than waiting for the OS to notice a dead socket.
 | Provider error after text       | No (partial) | error frame; partial text persisted by `OnFinish` |
 | Upstream hangs silently         | Yes          | idle watchdog → error frame                       |
 | Server restart (MemStore)       | No           | reply lost; user re-sends                         |
-| Server restart (Redis)          | Buffer survives; owner flag blocks a duplicate producer |
+| Server restart (Redis)          | Partial      | buffer survives; owner flag blocks a duplicate producer; the checkpoint has the IR up to the last step boundary |
+| Process dies mid-turn           | State: yes   | last `Checkpoint` + `CloseDangling`; the client sees no terminal frame until the app finishes the buffer |
 
 ## Trade-offs considered
 

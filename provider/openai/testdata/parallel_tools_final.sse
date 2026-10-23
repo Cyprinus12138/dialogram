@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-FixtureParallelFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureParallelFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"Lisbon is 27°C and sunny; the cheapest flight to Madrid is €89."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureParallelFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-FixtureParallelFinal","object":"chat.completion.chunk","created":1735689600,"model":"gpt-4o-mini-2024-07-18","service_tier":"default","system_fingerprint":"fp_fixture","choices":[],"usage":{"prompt_tokens":410,"completion_tokens":22,"total_tokens":432,"prompt_tokens_details":{"cached_tokens":256,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+
+data: [DONE]
+

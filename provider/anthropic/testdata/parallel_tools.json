@@ -1,0 +1,18 @@
+{
+  "id": "msg_01FixtureParallel",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-6",
+  "content": [
+    {"type": "tool_use", "id": "toolu_01NativeA", "name": "get_weather", "input": {"city": "Lisbon"}},
+    {"type": "tool_use", "id": "toolu_01NativeB", "name": "search_flights", "input": {"from": "LIS", "to": "MAD"}}
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 320,
+    "output_tokens": 78,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

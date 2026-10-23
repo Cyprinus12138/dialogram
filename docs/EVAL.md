@@ -17,6 +17,27 @@ asserting the machinery:
 - Anthropic `cache_control` placement: stable system block + last tool +
   last message carry the breakpoint; the volatile block does not.
 
+**Testing the adapters with replay fixtures.** `provider/anthropic/testdata/`
+and `provider/openai/testdata/` hold hand-written copies of each upstream's
+wire format — `.sse` files for the streaming form, `.json` for the
+non-streaming one — and the `replay_test.go` next to each adapter lists
+them in the order the upstream would answer. The `provider/internal/replay`
+server hands request N fixture N and records every request body, so one
+test covers the whole path: request building (system prompt, tool specs,
+Anthropic's `cache_control` breakpoints, OpenAI's `stream_options`),
+SSE/JSON parsing into stream events, the block IR, tool dispatch, the
+follow-up request and the final answer. Scenarios per adapter, on both
+paths where both exist: text only with usage and cache counters; one tool
+call; two parallel tool calls with results in model order; a
+`request_user_input` pause; a soft tool failure reaching the model as its
+failure JSON; a transient 529 / 429 retried with the identical body; the
+turns persisted on one provider resumed on the other; and a user turn
+carrying an image. Native ids in the fixtures (`toolu_…`, `call_…`) are
+deliberately recognisable, so a test that finds one on the wire or in the
+IR has found a bug. To add a scenario, write the fixture by hand from the
+provider's documented format — there is no recording tool, no network and
+no key involved.
+
 `agent.PromptFingerprint` / `Profile.Fingerprint()` are the
 **prompt-regression gate**: pin them in a golden test, and a prompt edit
 fails CI until the golden is re-baselined — a conscious act that flags the

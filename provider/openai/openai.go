@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -33,6 +34,12 @@ type Options struct {
 	Config       *agent.Config
 	Interceptors []agent.Interceptor
 	Skills       *agent.SkillLibrary
+	// Executor runs tool calls. nil selects tool.NewLocalExecutor with the
+	// default limits (60 s per call, 64 KiB observation, 8 in parallel).
+	Executor tool.Executor
+	// Checkpointer, when non-nil, receives the run's block IR at every step
+	// boundary (see agent.Checkpoint).
+	Checkpointer agent.Checkpointer
 }
 
 // DefaultModel is used when Options.Model is empty.
@@ -68,6 +75,9 @@ func New(o Options) *Provider {
 	if o.Registry == nil {
 		o.Registry = tool.NewRegistry()
 	}
+	if o.Executor == nil {
+		o.Executor = tool.NewLocalExecutor(o.Registry, tool.LocalExecutorOptions{})
+	}
 	return &Provider{
 		apiKey:    o.APIKey,
 		baseURL:   strings.TrimRight(o.BaseURL, "/"),
@@ -77,7 +87,7 @@ func New(o Options) *Provider {
 		reg:       o.Registry,
 		cfg:       o.Config,
 		skills:    o.Skills,
-		runner:    loop.Runner{Cfg: o.Config, Reg: o.Registry, Interceptors: o.Interceptors},
+		runner:    loop.Runner{Cfg: o.Config, Reg: o.Registry, Interceptors: o.Interceptors, Executor: o.Executor, Checkpointer: o.Checkpointer},
 	}
 }
 
@@ -150,13 +160,19 @@ type response struct {
 // wire shape. OpenAI carries the system prompt as the first message, so the
 // translator prepends it.
 //
-//   - "user"      — one message per user Turn; multi-text blocks concatenate.
+//   - "user"      — one message per user Turn; multi-text blocks concatenate
+//     into string Content. A turn that carries an image becomes a content
+//     array of text and image_url parts instead.
 //   - "assistant" — one message; text blocks concatenate into Content,
 //     tool_use blocks become ToolCalls. Content is nil (not "") when only
 //     tool_calls are present — OpenAI requires this.
 //   - "tool"      — expanded into N messages (role "tool"), one per
 //     tool_result block. Only model_observation is sent.
-func turnsToMessages(sysPrompt string, turns []agent.Turn) []message {
+//
+// An image block outside a user turn, or one that fails loop.CheckImage,
+// is an error: the request would be rejected upstream with a less useful
+// message.
+func turnsToMessages(sysPrompt string, turns []agent.Turn) ([]message, error) {
 	out := make([]message, 0, len(turns)+1)
 	if sysPrompt != "" {
 		out = append(out, message{Role: "system", Content: sysPrompt})
@@ -164,18 +180,36 @@ func turnsToMessages(sysPrompt string, turns []agent.Turn) []message {
 	for _, t := range turns {
 		switch t.Role {
 		case agent.RoleUser:
-			var text string
+			if !hasImage(t) {
+				var text string
+				for _, b := range t.Blocks {
+					if b.Type == agent.BlockText {
+						text += b.Text
+					}
+				}
+				out = append(out, message{Role: "user", Content: text})
+				continue
+			}
+			parts := make([]map[string]any, 0, len(t.Blocks))
 			for _, b := range t.Blocks {
-				if b.Type == agent.BlockText {
-					text += b.Text
+				switch b.Type {
+				case agent.BlockText:
+					parts = append(parts, map[string]any{"type": "text", "text": b.Text})
+				case agent.BlockImage:
+					if err := loop.CheckImage(t.Role, b); err != nil {
+						return nil, fmt.Errorf("openai: %w", err)
+					}
+					parts = append(parts, imagePart(b))
 				}
 			}
-			out = append(out, message{Role: "user", Content: text})
+			out = append(out, message{Role: "user", Content: parts})
 		case agent.RoleAssistant:
 			var text string
 			var calls []toolCall
 			for _, b := range t.Blocks {
 				switch b.Type {
+				case agent.BlockImage:
+					return nil, fmt.Errorf("openai: %w", loop.CheckImage(t.Role, b))
 				case agent.BlockText:
 					text += b.Text
 				case agent.BlockToolUse:
@@ -204,6 +238,9 @@ func turnsToMessages(sysPrompt string, turns []agent.Turn) []message {
 			out = append(out, msg)
 		case agent.RoleTool:
 			for _, b := range t.Blocks {
+				if b.Type == agent.BlockImage {
+					return nil, fmt.Errorf("openai: %w", loop.CheckImage(t.Role, b))
+				}
 				if b.Type != agent.BlockToolResult {
 					continue
 				}
@@ -212,7 +249,27 @@ func turnsToMessages(sysPrompt string, turns []agent.Turn) []message {
 			}
 		}
 	}
-	return out
+	return out, nil
+}
+
+func hasImage(t agent.Turn) bool {
+	for _, b := range t.Blocks {
+		if b.Type == agent.BlockImage {
+			return true
+		}
+	}
+	return false
+}
+
+// imagePart renders a validated image block as a chat/completions
+// image_url part. Inline data travels as a data: URI, which is the only
+// way this API accepts bytes.
+func imagePart(b agent.Block) map[string]any {
+	url := b.URL
+	if b.Data != "" {
+		url = "data:" + b.MediaType + ";base64," + b.Data
+	}
+	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}
 }
 
 // responseToTurn converts a non-streaming choice into an assistant Turn.
