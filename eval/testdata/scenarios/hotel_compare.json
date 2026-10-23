@@ -1,0 +1,107 @@
+{
+  "id": "hotel_compare",
+  "description": "A two-hotel comparison must cite both names and prices exactly as the tool returned them and stay short.",
+  "profile": "assistant",
+  "input_turns": [
+    {
+      "role": "user",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Compare the two cheapest hotels near the old town for Saturday."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "tool_use",
+          "tool_use_id": "dg_h1",
+          "tool_name": "search_hotels",
+          "tool_input": {
+            "area": "old town",
+            "date": "2026-05-09",
+            "limit": 2
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "dg_h1",
+          "tool_name": "search_hotels",
+          "tool_result": {
+            "model_observation": {
+              "hotels": [
+                {
+                  "name": "CASA DO RIO",
+                  "price": 112,
+                  "currency": "EUR",
+                  "rating": 8.6
+                },
+                {
+                  "name": "ALFAMA LOFT",
+                  "price": 98,
+                  "currency": "EUR",
+                  "rating": 8.1
+                }
+              ],
+              "n": 2,
+              "window": "rates for 2026-05-09"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "ok, which one?"
+        }
+      ]
+    }
+  ],
+  "recorded_reply": "ALFAMA LOFT is cheaper at €98 (rated 8.1); CASA DO RIO is €112 but rated 8.6. If the higher rate is fine, take CASA DO RIO; otherwise ALFAMA LOFT. Rates are for 2026-05-09.",
+  "recorded_tool_results": [
+    {
+      "model_observation": {
+        "hotels": [
+          {
+            "name": "CASA DO RIO",
+            "price": 112,
+            "currency": "EUR",
+            "rating": 8.6
+          },
+          {
+            "name": "ALFAMA LOFT",
+            "price": 98,
+            "currency": "EUR",
+            "rating": 8.1
+          }
+        ],
+        "n": 2,
+        "window": "rates for 2026-05-09"
+      }
+    }
+  ],
+  "expect": {
+    "must_ground": true,
+    "reply_must_contain": [
+      "ALFAMA LOFT",
+      "CASA DO RIO",
+      "€98",
+      "€112"
+    ],
+    "expect_language": "en",
+    "rubric_floors": {
+      "faithfulness": 5,
+      "conciseness": 4
+    }
+  }
+}

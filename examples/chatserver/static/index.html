@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dialogram chat</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --fg:#e7e9ee; --muted:#8b93a7; --accent:#6ea8fe; --user:#2b3550; --border:#262b36; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f7f9; --panel:#fff; --fg:#1b1f27; --muted:#6b7280; --accent:#2563eb; --user:#e8efff; --border:#e2e5ea; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:center }
+  header h1 { font-size:16px; margin:0; font-weight:600 }
+  header .meta { color:var(--muted); font-size:12px; margin-left:auto }
+  main { max-width:820px; margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:12px; min-height:calc(100vh - 130px) }
+  .msg { padding:10px 14px; border-radius:12px; max-width:92%; white-space:pre-wrap; word-wrap:break-word }
+  .user { background:var(--user); align-self:flex-end }
+  .assistant { background:var(--panel); border:1px solid var(--border); align-self:flex-start }
+  .tool { font-size:12px; color:var(--muted); align-self:flex-start; padding:2px 10px }
+  .tool.done::before { content:"✓ "; color:var(--accent) }
+  .tool.busy::before { content:"⟳ "; animation:spin 1s linear infinite; display:inline-block }
+  @keyframes spin { to { transform:rotate(360deg) } }
+  .genui { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:12px; align-self:stretch }
+  .genui h4 { margin:0 0 8px; font-size:13px; color:var(--muted); font-weight:600 }
+  .cards { display:flex; gap:8px; flex-wrap:wrap }
+  .card { flex:1 1 120px; border:1px solid var(--border); border-radius:8px; padding:8px 10px }
+  .card .v { font-size:20px; font-weight:600 } .card.hl .v { color:var(--accent) } .card .s { font-size:12px; color:var(--muted) }
+  .bar { display:grid; grid-template-columns:90px 1fr 50px; gap:8px; align-items:center; font-size:13px; margin:3px 0 }
+  .bar div.b { height:14px; background:var(--accent); border-radius:4px; opacity:.85 }
+  table { border-collapse:collapse; width:100%; font-size:13px } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border) }
+  .pause { background:var(--panel); border:1px dashed var(--accent); border-radius:12px; padding:12px; align-self:stretch }
+  .pause p { margin:0 0 8px }
+  .chips { display:flex; gap:8px; flex-wrap:wrap }
+  button, input, textarea { font:inherit; color:inherit } 
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 12px; cursor:pointer } button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent) }
+  button.chip.on { outline:2px solid #fff }
+  input, textarea { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px }
+  form.compose { position:sticky; bottom:0; background:var(--bg); padding:12px 0 16px; display:flex; gap:8px }
+  .err { color:#f87171; font-size:13px; align-self:flex-start }
+  .status { color:var(--muted); font-size:12px; align-self:flex-start }
+  svg { width:100%; height:140px }
+</style>
+</head>
+<body>
+<header>
+  <h1>dialogram</h1>
+  <button class="ghost" id="new">New chat</button>
+  <span class="meta" id="meta"></span>
+</header>
+<main id="log"></main>
+<form class="compose" id="compose">
+  <input id="text" placeholder="Ask about weather or flights… (try: weather in Lisbon and the cheapest flight from Lisbon to Porto on 2026-06-05)" autocomplete="off">
+  <button type="submit" id="send">Send</button>
+  <button type="button" class="ghost" id="cancel" hidden>Stop</button>
+</form>
+<script>
+// ---- state ---------------------------------------------------------------
+const LS_CONV = "dialogram.conversation_id", LS_PENDING = "dialogram.pending_stream";
+let conversationId = localStorage.getItem(LS_CONV) || "";
+let current = null;          // {messageId, since, abort, bubble, hiddenAt}
+const log = document.getElementById("log"), meta = document.getElementById("meta");
+const $ = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const add = e => { log.appendChild(e); window.scrollTo(0, document.body.scrollHeight); return e; };
+
+// ---- rendering -----------------------------------------------------------
+function renderGenUI(p) {
+  if (!p || !p.type) return;
+  const box = $("div", "genui"); if (p.title) box.appendChild($("h4", null, p.title));
+  if (p.type === "metric_cards") {
+    const row = $("div", "cards");
+    for (const c of p.cards || []) { const card = $("div", "card" + (c.highlight ? " hl" : "")); card.appendChild($("div", "s", c.label)); card.appendChild($("div", "v", c.value)); if (c.sub) card.appendChild($("div", "s", c.sub)); row.appendChild(card); }
+    box.appendChild(row);
+  } else if (p.type === "bar_chart") {
+    const max = Math.max(...(p.data || []).map(d => +d.value || 0), 1);
+    for (const d of p.data || []) { const r = $("div", "bar"); r.appendChild($("span", null, d.label)); const b = $("div", "b"); b.style.width = (100 * (+d.value) / max) + "%"; r.appendChild(b); r.appendChild($("span", null, String(d.value))); box.appendChild(r); }
+  } else if (p.type === "line_chart") {
+    const series = p.series && p.series.length ? p.series : [{ name: "", data: p.data || [] }];
+    const all = series.flatMap(s => s.data.map(d => +d.value)); const min = Math.min(...all), max = Math.max(...all), span = (max - min) || 1;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 400 140");
+    series.forEach((s, i) => { const pts = s.data.map((d, j) => `${10 + 380 * j / Math.max(s.data.length - 1, 1)},${125 - 110 * ((+d.value) - min) / span}`).join(" ");
+      const pl = document.createElementNS("http://www.w3.org/2000/svg", "polyline"); pl.setAttribute("points", pts); pl.setAttribute("fill", "none"); pl.setAttribute("stroke", i ? "#f59e0b" : "var(--accent)"); pl.setAttribute("stroke-width", "2"); svg.appendChild(pl); });
+    box.appendChild(svg);
+    box.appendChild($("div", "s", series.map(s => s.name).filter(Boolean).join(" · ") + (p.data ? ` ${p.data[0]?.label} → ${p.data[p.data.length - 1]?.label}` : "")));
+  } else if (p.type === "comparison_table") {
+    const t = $("table"), tr = $("tr"); for (const c of p.columns || []) tr.appendChild($("th", null, c)); t.appendChild(tr);
+    for (const row of p.rows || []) { const r = $("tr"); for (const cell of row) r.appendChild($("td", null, cell)); t.appendChild(r); }
+    box.appendChild(t);
+  } else return;
+  add(box);
+}
+
+function renderPause(ev) {
+  const box = $("div", "pause"); const kind = ev.kind || "hitl";
+  const input = ev.input ? JSON.parse(typeof ev.input === "string" ? ev.input : JSON.stringify(ev.input)) : {};
+  const submit = payload => { box.remove(); respond(ev.tool_use_id, payload); };
+  if (kind === "hitl_choice") {
+    box.appendChild($("p", null, ev.message || input.prompt || "Pick one")); const chips = $("div", "chips"); const picked = new Set(); let other = null;
+    for (const o of ev.options || input.options || []) { const b = $("button", "chip", o.label); b.type = "button"; b.onclick = () => { if (ev.multiple || input.multiple) { picked.has(o.value) ? picked.delete(o.value) : picked.add(o.value); b.classList.toggle("on"); } else submit({ selected: [o.value] }); }; chips.appendChild(b); }
+    if (input.allow_other) { const b = $("button", "chip ghost", "Other…"); b.type = "button"; b.onclick = () => { other = $("input"); other.placeholder = "Describe it"; box.appendChild(other); other.focus(); picked.add("__other__"); }; chips.appendChild(b); }
+    box.appendChild(chips);
+    if (ev.multiple || input.multiple || input.allow_other) { const ok = $("button", null, "Confirm"); ok.type = "button"; ok.onclick = () => submit({ selected: [...picked], other_text: other ? other.value : "" }); box.appendChild(ok); }
+  } else if (kind === "hitl_form") {
+    box.appendChild($("p", null, input.title || ev.message || "A few questions")); const fields = {};
+    for (const q of input.questions || []) { box.appendChild($("div", "s", q.prompt)); if (q.type === "text") { const i = $("input"); i.placeholder = q.placeholder || ""; fields[q.id] = () => i.value; box.appendChild(i); }
+      else { const sel = new Set(); const chips = $("div", "chips"); for (const o of q.options || []) { const b = $("button", "chip", o.label); b.type = "button"; b.onclick = () => { if (q.type === "single_choice") { sel.clear(); chips.querySelectorAll(".on").forEach(x => x.classList.remove("on")); } sel.has(o.value) ? sel.delete(o.value) : sel.add(o.value); b.classList.toggle("on"); }; chips.appendChild(b); } box.appendChild(chips); fields[q.id] = () => q.type === "single_choice" ? { value: [...sel][0] || "" } : { values: [...sel] }; } }
+    const ok = $("button", null, "Submit"); ok.type = "button"; ok.onclick = () => { const answers = {}; for (const k in fields) answers[k] = fields[k](); submit({ answers }); }; box.appendChild(ok);
+  } else if (kind === "approval") {
+    box.appendChild($("p", null, ev.message || `${ev.name} needs your approval`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2)));
+    const row = $("div", "chips"); const yes = $("button", null, "Approve"); yes.type = "button"; yes.onclick = () => submit({ approved: true }); const no = $("button", "ghost", "Deny"); no.type = "button"; no.onclick = () => submit({ approved: false }); row.append(yes, no); box.appendChild(row);
+  } else if (kind === "custom") {
+    box.appendChild($("p", null, `${ev.name} proposed:`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2)));
+    const row = $("div", "chips"); for (const v of ["accept", "skip"]) { const b = $("button", v === "skip" ? "ghost" : null, v); b.type = "button"; b.onclick = () => submit({ selected: [v] }); row.appendChild(b); } box.appendChild(row);
+  } else {
+    box.appendChild($("p", null, ev.message || "The assistant has a question")); const i = $("input"); const ok = $("button", null, "Answer"); ok.type = "button"; ok.onclick = () => submit({ response: i.value }); box.append(i, ok);
+  }
+  add(box);
+}
+
+// ---- hydration -----------------------------------------------------------
+async function hydrate() {
+  if (!conversationId) return;
+  const res = await fetch(`/conversations/${conversationId}`); if (!res.ok) { localStorage.removeItem(LS_CONV); conversationId = ""; return; }
+  const c = await res.json(); log.innerHTML = "";
+  for (const t of c.turns || []) for (const b of t.blocks || []) {
+    if (b.type === "text" && t.role === "user") add($("div", "msg user", b.text));
+    else if (b.type === "text") add($("div", "msg assistant", b.text));
+    else if (b.type === "tool_use" && b.tool_name !== "present_data") add($("div", "tool done", b.tool_name));
+    else if (b.type === "tool_use") renderGenUI(b.tool_input);
+    else if (b.type === "tool_result" && b.tool_result && b.tool_result.ui_payload) renderGenUI(b.tool_result.ui_payload.data);
+  }
+  if (c.pending) renderPause({ kind: c.pending.kind, tool_use_id: c.pending.tool_use_id, name: c.pending.tool_name, input: c.pending.tool_input, message: c.pending.prompt });
+}
+
+// ---- streaming -----------------------------------------------------------
+function setBusy(b) { document.getElementById("send").disabled = b; document.getElementById("cancel").hidden = !b; }
+
+async function stream(url, body, onEvent) {
+  const abort = new AbortController(); current.abort = abort;
+  const res = await fetch(url, { method: body == null ? "GET" : "POST", headers: { "content-type": "application/json" }, body: body == null ? undefined : JSON.stringify(body), signal: abort.signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) { const { value, done } = await reader.read(); if (done) break; buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf("\n\n")) >= 0) { const frame = buf.slice(0, i); buf = buf.slice(i + 2); let id = null, data = null;
+      for (const line of frame.split("\n")) { if (line.startsWith("id: ")) id = +line.slice(4); else if (line.startsWith("data: ")) data = line.slice(6); }
+      if (data == null) continue; if (id) current.since = id; const ev = JSON.parse(data); onEvent(ev); if (ev.type === "done" || ev.type === "error" || ev.type === "waiting_for_user") return "ended"; } }
+  return "closed";
+}
+
+async function runResumable(firstBody) {
+  const tools = new Map(); let text = ""; setBusy(true);
+  const onEvent = ev => {
+    switch (ev.type) {
+      case "meta": if (ev.message && !conversationId) { conversationId = ev.message; localStorage.setItem(LS_CONV, conversationId); } if (ev.model) meta.textContent = `${ev.provider} · ${ev.model}`; break;
+      case "text": if (!current.bubble) current.bubble = add($("div", "msg assistant", "")); text += ev.delta; current.bubble.textContent = text; break;
+      case "tool_call": tools.set(ev.tool_use_id, add($("div", "tool busy", ev.label || ev.name))); current.bubble = null; text = ""; break;
+      case "tool_result": { const row = tools.get(ev.tool_use_id); if (row) row.className = "tool done"; break; }
+      case "gen_ui": renderGenUI(ev.gen_ui); break;
+      case "waiting_for_user": renderPause(ev); break;
+      case "usage": add($("div", "status", `tokens in ${ev.input_tokens} · out ${ev.output_tokens}` + (ev.cache_read_tokens ? ` · cache read ${ev.cache_read_tokens}` : ""))); break;
+      case "error": add($("div", "err", ev.message)); break;
+    }
+  };
+  let body = firstBody, attempts = 0;
+  for (;;) {
+    localStorage.setItem(LS_PENDING, JSON.stringify({ messageId: current.messageId, since: current.since }));
+    try {
+      const outcome = await stream(`/chat/stream?message_id=${current.messageId}&since=${current.since}`, body, onEvent);
+      if (outcome === "ended") break;
+    } catch (e) { if (e.name !== "AbortError") { add($("div", "status", `connection lost — resuming from #${current.since}`)); } }
+    body = null; // every reconnect is a pure tail
+    if (++attempts > 8) { add($("div", "err", "gave up resuming; the reply is kept server-side — reload to fetch it")); break; }
+    await new Promise(r => setTimeout(r, Math.min(300 * 2 ** (attempts - 1), 3000)));
+  }
+  localStorage.removeItem(LS_PENDING); current = null; setBusy(false);
+}
+
+function start(messageId, since, firstBody) { current = { messageId, since, abort: null, bubble: null }; return runResumable(firstBody); }
+
+async function respond(toolUseId, payload) {
+  const res = await fetch("/chat/respond", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversation_id: conversationId, tool_use_id: toolUseId, message_id: crypto.randomUUID(), ...payload }) });
+  if (!res.ok) { add($("div", "err", `respond failed: ${res.status}`)); return; }
+  const { message_id } = await res.json(); start(message_id, 0, null); // pure tail of the continuation producer
+}
+
+document.getElementById("compose").onsubmit = e => { e.preventDefault(); if (current) return; const t = document.getElementById("text"); const msg = t.value.trim(); if (!msg) return; t.value = "";
+  add($("div", "msg user", msg)); start(crypto.randomUUID(), 0, { conversation_id: conversationId, message: msg }); };
+document.getElementById("cancel").onclick = () => { if (current) fetch(`/chat/cancel?message_id=${current.messageId}`, { method: "POST" }); };
+document.getElementById("new").onclick = () => { localStorage.removeItem(LS_CONV); localStorage.removeItem(LS_PENDING); conversationId = ""; log.innerHTML = ""; };
+// A tab that comes back after being hidden reconnects immediately rather than waiting for the OS to notice a dead socket.
+document.addEventListener("visibilitychange", () => { if (!current) return; if (document.hidden) current.hiddenAt = Date.now(); else if (current.hiddenAt && Date.now() - current.hiddenAt > 5000 && current.abort) current.abort.abort(); });
+
+(async () => { await hydrate(); const p = JSON.parse(localStorage.getItem(LS_PENDING) || "null"); if (p) { add($("div", "status", "rejoining in-flight reply…")); start(p.messageId, p.since || 0, null); } })();
+</script>
+</body>
+</html>

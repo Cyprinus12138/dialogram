@@ -1,0 +1,18 @@
+{
+  "id": "weather_grounded_zh",
+  "description": "A Chinese question must get a Chinese answer whose figures come from the weather tool.",
+  "profile": "assistant",
+  "input_turns": [
+    { "role": "user", "blocks": [ { "type": "text", "text": "里斯本明天多少度？会下雨吗？" } ] }
+  ],
+  "tool_results": {
+    "get_weather": { "model_observation": { "city": "Lisbon", "date": "2026-05-09", "high_c": 24, "low_c": 15, "rain_chance_pct": 10, "source": "weather service, retrieved 2026-05-08" } }
+  },
+  "recorded_reply": "里斯本明天最高 24 度、最低 15 度，降雨概率 10%，基本不会下雨（数据来源：weather service，2026-05-08 获取）。",
+  "expect": {
+    "must_ground": true,
+    "reply_must_contain": ["24", "15", "10%"],
+    "expect_language": "zh",
+    "rubric_floors": { "faithfulness": 5, "citation_present": 4, "language_match": 5 }
+  }
+}

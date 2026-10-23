@@ -1,0 +1,30 @@
+[
+  {
+    "name": "load_skill",
+    "spec_hash": "bf47895d9e39854fcb73da96aead4313878da14b2a1b076cdbda77e0f79e078c"
+  },
+  {
+    "name": "now",
+    "spec_hash": "219b8b0b0f1a672d7fb832fba7a2ed72042cbf4724cb102fd3db479c4ee05dd3"
+  },
+  {
+    "name": "present_data",
+    "spec_hash": "22d45355e731e786e8396d7883224dcec3f42be9f36b04ab9d8a9db219ea1f4a"
+  },
+  {
+    "name": "render_from_ref",
+    "spec_hash": "980a99b71940edfdf189e1188e91ffc005c45b19418fd04dfa129a175d00a33d"
+  },
+  {
+    "name": "request_user_choice",
+    "spec_hash": "83fd76fb5cb5ba942246ca4a2a8052a67f63a49a7523c0bae75503a3fec743eb"
+  },
+  {
+    "name": "request_user_form",
+    "spec_hash": "e873cc0a584d15eb7172631ac24b79341a359fd347efb5459a42704adff6d1e4"
+  },
+  {
+    "name": "request_user_input",
+    "spec_hash": "60de7475438e9b8ffd3b594d9d4964dfdda7e813a0da4afbbd33fcbb1db26d27"
+  }
+]

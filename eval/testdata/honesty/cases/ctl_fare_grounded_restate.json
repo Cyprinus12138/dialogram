@@ -1,0 +1,15 @@
+{
+  "id": "ctl_fare_grounded_restate",
+  "description": "Control: the fare IS available. The guard must leave the grounded figure alone, including when the model restates it on a later turn with no tool call.",
+  "profile": "assistant",
+  "group": "control",
+  "cluster": "grounded",
+  "user_turns": [
+    "Cheapest flight Lisbon to Madrid next Tuesday morning?",
+    "So what did you say the fare was again, and when is it due?"
+  ],
+  "tool_results": {
+    "search_flights": { "model_observation": { "in_budget": [ { "carrier": "SKYLINE", "departs": "07:40", "fare": 412, "currency": "USD" } ], "n_in_budget": 1, "n": 6, "window": "searched 2026-05-08" } }
+  },
+  "expect": { "no_redaction": true, "must_keep_figures": ["412"] }
+}

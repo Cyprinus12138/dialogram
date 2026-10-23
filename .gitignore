@@ -1,0 +1,20 @@
+# binaries / build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# local secrets
+.env
+.env.*
+!.env.example
+
+# eval run artifacts (reports are written where EVAL_REPORT_PATH / HONESTY_REPORT_PATH point)
+/eval/testdata/honesty/recorded/*.tmp
