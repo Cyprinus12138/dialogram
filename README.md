@@ -99,12 +99,14 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 | `provider/anthropic`, `provider/openai` | Wire adapters: translators, streaming parsers, cache breakpoints, retries |
 | `streambuf` | `Store` contract with `MemStore` and `RedisStore` |
 | `sse` | The resumable HTTP handler: detached producer, idle watchdog, cancel, gen_ui conversion, `OnFinish` persistence hook |
+| `agui` | [AG-UI protocol](https://docs.ag-ui.com) transport for CopilotKit-compatible frontends: `Encoder` from stream events to AG-UI events, messages ⇄ turns conversion, one-run-per-request handler |
 | `eval` | Grounding checker, LLM-as-judge scenarios, manifest pins, budgets, honesty-guard A/B runner |
 | `dialogram` (root) | `New` / `NewProvider` / `SettingsFromEnv` |
 
 ## Docs
 
 - [docs/STREAMING.md](docs/STREAMING.md) — the resumable stream protocol and the store contract
+- [docs/AGUI.md](docs/AGUI.md) — serving a run over the AG-UI protocol, and when to prefer it over `sse`
 - [docs/BLOCK_IR.md](docs/BLOCK_IR.md) — the block IR, the three-channel envelope and artifact handles
 - [docs/SKILLS.md](docs/SKILLS.md) — SKILL.md bundles and on-demand loading
 - [docs/MCP.md](docs/MCP.md) — MCP servers as tool sources: transports, registration, result mapping, the isolation stance

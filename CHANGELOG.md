@@ -96,6 +96,12 @@ All notable changes to this project are documented here. The format follows
   hand-written upstream responses — text, tool loop, parallel tools,
   pause, soft failure, transient-error retry, cross-provider resume and
   image turns — with no network or API key.
+- `agui`: AG-UI protocol transport — `Encoder` maps stream events to AG-UI
+  events with well-formedness guarantees (every START closed, one terminal
+  event, pauses emit their tool call then `RUN_FINISHED`),
+  `MessagesToTurns` / `TurnsToMessages` round-trip the client-held history
+  through the block IR, and `NewHandler` streams one run per request as
+  `data:` frames. `examples/agui` serves a weather tool over it.
 
 ### Changed (relative to the production code this was extracted from)
 - Grounding is outcome-aware: a tool call whose result carries

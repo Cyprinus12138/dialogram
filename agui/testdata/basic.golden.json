@@ -1,0 +1,92 @@
+[
+  {
+    "type": "RUN_STARTED",
+    "threadId": "thread_1",
+    "runId": "run_1"
+  },
+  {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "id_1",
+    "role": "assistant"
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "id_1",
+    "delta": "Here is "
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "id_1",
+    "delta": "the forecast."
+  },
+  {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "id_1"
+  },
+  {
+    "type": "TOOL_CALL_START",
+    "toolCallId": "dg_1",
+    "toolCallName": "get_weather",
+    "parentMessageId": "id_1"
+  },
+  {
+    "type": "TOOL_CALL_ARGS",
+    "toolCallId": "dg_1",
+    "delta": "{\"city\":\"Lisbon\"}"
+  },
+  {
+    "type": "TOOL_CALL_END",
+    "toolCallId": "dg_1"
+  },
+  {
+    "type": "TOOL_CALL_RESULT",
+    "messageId": "id_2",
+    "role": "tool",
+    "toolCallId": "dg_1",
+    "content": "{\"model_observation\":{\"high_c\":24}}"
+  },
+  {
+    "type": "CUSTOM",
+    "name": "gen_ui",
+    "value": {
+      "type": "bar_chart",
+      "data": [
+        {
+          "label": "Mon",
+          "value": 24
+        }
+      ]
+    }
+  },
+  {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "id_3",
+    "role": "assistant"
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "id_3",
+    "delta": "Warm week ahead."
+  },
+  {
+    "type": "CUSTOM",
+    "name": "usage",
+    "value": {
+      "input_tokens": 120,
+      "output_tokens": 40,
+      "cache_read_tokens": 100,
+      "cache_creation_tokens": 0,
+      "model": "model-x",
+      "provider": "anthropic"
+    }
+  },
+  {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "id_3"
+  },
+  {
+    "type": "RUN_FINISHED",
+    "threadId": "thread_1",
+    "runId": "run_1"
+  }
+]
