@@ -91,6 +91,7 @@ Always prefer this over present_data when an upstream tool already returned an a
 				return SoftEnvelope("UNSUPPORTED_COMPONENT", fmt.Sprintf("component %q not supported", args.Component)), nil
 			}
 		},
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }
 

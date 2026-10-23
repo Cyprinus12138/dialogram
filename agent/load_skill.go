@@ -49,5 +49,6 @@ func RegisterLoadSkill(reg *tool.Registry, lib *SkillLibrary) {
 			}
 			return map[string]any{"id": s.ID, "name": s.Name, "body": s.Body}, nil
 		},
+		Annotations: tool.Annotations{ReadOnly: true, Idempotent: true},
 	})
 }

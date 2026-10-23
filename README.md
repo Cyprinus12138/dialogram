@@ -95,6 +95,7 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 |---|---|
 | `agent` | Block IR, `Provider` contract, `Agent` wrapper, profiles, interceptors, pause detection, skills, the honesty `Guard`, opt-in Prometheus metrics |
 | `tool` | `Tool`, `Registry`, the three-channel `Envelope`, `ArtifactStore`, built-in tools (HITL ×3, `present_data`, `render_from_ref`, `now`) |
+| `tool/mcp` | MCP client as a tool source: `Connect` to a server over stdio or streamable HTTP, `Register` its tools under a per-server prefix, results mapped to the registry's shapes |
 | `provider/anthropic`, `provider/openai` | Wire adapters: translators, streaming parsers, cache breakpoints, retries |
 | `streambuf` | `Store` contract with `MemStore` and `RedisStore` |
 | `sse` | The resumable HTTP handler: detached producer, idle watchdog, cancel, gen_ui conversion, `OnFinish` persistence hook |
@@ -106,6 +107,7 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 - [docs/STREAMING.md](docs/STREAMING.md) — the resumable stream protocol and the store contract
 - [docs/BLOCK_IR.md](docs/BLOCK_IR.md) — the block IR, the three-channel envelope and artifact handles
 - [docs/SKILLS.md](docs/SKILLS.md) — SKILL.md bundles and on-demand loading
+- [docs/MCP.md](docs/MCP.md) — MCP servers as tool sources: transports, registration, result mapping, the isolation stance
 - [docs/EVAL.md](docs/EVAL.md) — the three-layer evaluation harness
 - [docs/HONESTY_AB.md](docs/HONESTY_AB.md) — how to measure an honesty guard, and what the first measurement taught
 

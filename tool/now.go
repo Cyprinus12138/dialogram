@@ -35,5 +35,6 @@ func Now(loc *time.Location) *Tool {
 				"timezone": loc.String(),
 			}, nil
 		},
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }

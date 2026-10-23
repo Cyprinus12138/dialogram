@@ -113,5 +113,6 @@ Always call this tool AFTER gathering real data — never fabricate values. Foll
 		Fn: func(ctx context.Context, input json.RawMessage) (any, error) {
 			return map[string]any{"displayed": true}, nil
 		},
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }

@@ -38,6 +38,43 @@ type Tool struct {
 	Label  string
 	Schema map[string]any
 	Fn     func(ctx context.Context, input json.RawMessage) (any, error)
+	// Annotations are server-side behavioural hints (read-only, destructive,
+	// idempotent, open-world). They drive policy code such as
+	// agent.PolicyInterceptor and are never sent to the model: AnthropicSpec
+	// and OpenAISpec ignore them, so the wire tool list and the eval
+	// manifest hash are unchanged by annotating a tool.
+	Annotations Annotations `json:"annotations,omitzero"`
+}
+
+// Annotations are behavioural hints about a tool, mirroring the MCP tool
+// annotations field for field:
+//
+//   - ReadOnly    ↔ readOnlyHint:    the tool does not modify its environment.
+//   - Destructive ↔ destructiveHint: the tool may perform destructive,
+//     irreversible updates. Only meaningful when ReadOnly is false.
+//   - Idempotent  ↔ idempotentHint:  repeating the call with the same
+//     arguments has no additional effect. Only meaningful when ReadOnly is
+//     false, but harmless to set on a read-only tool.
+//   - OpenWorld   ↔ openWorldHint:   the tool talks to an open world of
+//     external entities (the web, third-party APIs) whose content the
+//     application does not control.
+//
+// One deliberate difference from MCP: every field here defaults to false.
+// MCP defaults destructiveHint and openWorldHint to true, which is the safe
+// direction for a hint a server may have forgotten to set, but in-process
+// tools are authored alongside the policy that reads them, so an explicit
+// opt-in reads better than a default that every read-only tool has to
+// unset. Translate accordingly when bridging to or from MCP.
+//
+// Like their MCP counterparts these are hints, not guarantees: the loop
+// does not verify them, and a policy built on them is only as honest as
+// the tool that declared them. Annotations are not model-visible — they
+// shape what the server lets a tool do, not what the model is told.
+type Annotations struct {
+	ReadOnly    bool `json:"read_only,omitempty"`
+	Destructive bool `json:"destructive,omitempty"`
+	Idempotent  bool `json:"idempotent,omitempty"`
+	OpenWorld   bool `json:"open_world,omitempty"`
 }
 
 // Per-call context keys for state the registry threads into Fn so

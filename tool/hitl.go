@@ -103,7 +103,8 @@ func hitlInput() *Tool {
 				"reason": map[string]any{"type": "string", "description": descReason},
 			},
 		},
-		Fn: shortCircuit,
+		Fn:          shortCircuit,
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }
 
@@ -129,7 +130,8 @@ func hitlChoice() *Tool {
 				"reason":      map[string]any{"type": "string", "description": descChoiceReason},
 			},
 		},
-		Fn: shortCircuit,
+		Fn:          shortCircuit,
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }
 
@@ -173,7 +175,8 @@ func hitlForm() *Tool {
 				},
 			},
 		},
-		Fn: shortCircuit,
+		Fn:          shortCircuit,
+		Annotations: Annotations{ReadOnly: true, Idempotent: true},
 	}
 }
 
