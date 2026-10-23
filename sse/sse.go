@@ -18,6 +18,13 @@
 // `: ping` comment lines keep proxies happy and carry no id. The stream
 // ends on a `done`, `error` or `waiting_for_user` event; the buffer's
 // terminal status is set at the same time.
+//
+// Tracing: the producer's detached context carries the span context of
+// the request that launched it, so the run's spans are children of that
+// request's span in one trace. Every request's span gets the
+// dialogram.message_id attribute, and a request that tails a producer
+// running in this process also gets a link to the launching request's
+// span. See docs/OBSERVABILITY.md.
 package sse
 
 import (
@@ -36,7 +43,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Cyprinus12138/dialogram/agent"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 	"github.com/Cyprinus12138/dialogram/streambuf"
 	"github.com/Cyprinus12138/dialogram/tool"
 )
@@ -104,7 +114,9 @@ type Options struct {
 	IsResume func(body []byte) bool
 	// ProducerContext returns the base context the detached producer runs
 	// in. Use it to stamp request-scoped values (user id, trace id) that
-	// tools need. Default context.Background().
+	// tools need. Default context.Background(). When the returned context
+	// carries no span context, the request's own span context is added to
+	// it, so the run's spans join the request's trace.
 	ProducerContext func(r *http.Request) context.Context
 	// OnFinish is called once per producer run, on a fresh context, after
 	// the terminal event is in the buffer.
@@ -202,6 +214,9 @@ type Handler struct {
 type producerCtl struct {
 	cancel        context.CancelFunc
 	userCancelled atomic.Bool
+	// launch is the span context the producer runs under; a request that
+	// tails this producer links to it.
+	launch trace.SpanContext
 }
 
 // NewHandler builds a Handler over store and produce.
@@ -272,8 +287,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	reqSpan := trace.SpanFromContext(r.Context())
+	if reqSpan.IsRecording() {
+		reqSpan.SetAttributes(telemetry.MessageID.String(msgID))
+	}
+	launched := false
 	if !isResume {
-		if _, err := h.Launch(h.opts.ProducerContext(r), msgID, body); err != nil {
+		acquired, err := h.Launch(producerContext(h.opts.ProducerContext(r), r), msgID, body)
+		if err != nil {
 			h.opts.Logger.Error("stream start failed", "err", err, "message_id", msgID)
 			writeFrame(w, 0, agent.StreamEvent{Type: agent.EventError, Message: "service temporarily unavailable — please retry"})
 			flush()
@@ -281,8 +302,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Not acquired means a producer already owns this id (a retried
 		// connect) — just tail it.
+		launched = acquired
+	}
+	if !launched && reqSpan.IsRecording() {
+		if v, ok := h.inflight.Load(msgID); ok {
+			if ctl, _ := v.(*producerCtl); ctl != nil && ctl.launch.IsValid() {
+				reqSpan.AddLink(trace.Link{SpanContext: ctl.launch})
+			}
+		}
 	}
 	h.tail(w, r, msgID, since, flush)
+}
+
+// producerContext adds the request's span context to base unless base
+// already carries one. The span context is attached as a local parent
+// (trace.ContextWithSpanContext), not the live span: the request span ends
+// when the connection does, while the run it launched keeps going, and a
+// ParentBased sampler applies its local-parent rule to a span of this
+// process.
+func producerContext(base context.Context, r *http.Request) context.Context {
+	if base == nil {
+		base = context.Background()
+	}
+	if trace.SpanContextFromContext(base).IsValid() {
+		return base
+	}
+	if sc := trace.SpanContextFromContext(r.Context()); sc.IsValid() {
+		return trace.ContextWithSpanContext(base, sc)
+	}
+	return base
 }
 
 // Launch claims msgID in the store and, if this caller won, starts the
@@ -299,7 +347,7 @@ func (h *Handler) Launch(base context.Context, msgID string, body []byte) (acqui
 		base = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(base, h.opts.ProducerTimeout)
-	ctl := &producerCtl{cancel: cancel}
+	ctl := &producerCtl{cancel: cancel, launch: trace.SpanContextFromContext(base)}
 	// Belt and braces: even if a store ever allowed a double Start, only
 	// one producer goroutine spawns per id per process.
 	if _, loaded := h.inflight.LoadOrStore(msgID, ctl); loaded {

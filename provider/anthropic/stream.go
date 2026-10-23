@@ -12,6 +12,7 @@ import (
 
 	"github.com/Cyprinus12138/dialogram/agent"
 	"github.com/Cyprinus12138/dialogram/internal/loop"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 )
 
 // ChatStream implements the Messages streaming protocol. Per step it
@@ -61,22 +62,28 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			emittedText                      bool
 		)
 
+		// One model-call span covers every attempt of this step; each
+		// retried attempt is a retry event on it.
+		mctx, mc := telemetry.StartModelCall(ctx, telemetry.ModelRequest{
+			Provider: p.Name(), Model: p.model, Step: step + 1, Stream: true, MaxTokens: p.maxTokens, BaseURL: p.baseURL,
+		})
 		var lastErr error
 		for attempt := 0; attempt <= loop.MaxStreamRetries; attempt++ {
 			if attempt > 0 {
 				slog.Info("anthropic stream retry", "step", step, "attempt", attempt, "prev_err", lastErr)
 				if err := loop.WaitBackoff(ctx, attempt); err != nil {
-					return err
+					return mc.Fail(0, err)
 				}
 			}
+			mc.Attempt()
 			blocks = map[int]*blk{}
 			maxIdx = -1
 			stopReason = ""
 			stepIn, stepOut, stepCacheRead, stepCacheCreation = 0, 0, 0, 0
 
-			req, err := p.newRequest(ctx, body, true)
+			req, err := p.newRequest(mctx, body, true)
 			if err != nil {
-				return err
+				return mc.Fail(0, err)
 			}
 			started := time.Now()
 			resp, err := p.http.Do(req)
@@ -84,9 +91,10 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 				slog.Warn("anthropic stream failed", "err", err, "attempt", attempt, "duration_ms", time.Since(started).Milliseconds())
 				if loop.IsTransientStreamErr(err) && attempt < loop.MaxStreamRetries && !emittedText {
 					lastErr = err
+					mc.Retry(0, err)
 					continue
 				}
-				return fmt.Errorf("anthropic stream request: %w", err)
+				return mc.Fail(0, fmt.Errorf("anthropic stream request: %w", err))
 			}
 			if resp.StatusCode != http200 {
 				raw, _ := io.ReadAll(resp.Body)
@@ -94,9 +102,10 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 				slog.Warn("anthropic stream non-200", "status", resp.StatusCode, "body", string(raw))
 				if loop.Retryable(resp.StatusCode) && attempt < loop.MaxStreamRetries && !emittedText {
 					lastErr = fmt.Errorf("anthropic %d", resp.StatusCode)
+					mc.Retry(resp.StatusCode, lastErr)
 					continue
 				}
-				return fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(raw))
+				return mc.Fail(resp.StatusCode, fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(raw)))
 			}
 
 			scanner := bufio.NewScanner(resp.Body)
@@ -191,16 +200,18 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			if loop.IsTransientStreamErr(sErr) && attempt < loop.MaxStreamRetries && !emittedText {
 				lastErr = sErr
 				slog.Warn("anthropic stream read transient, retrying", "err", sErr, "attempt", attempt)
+				mc.Retry(0, sErr)
 				continue
 			}
 			if emittedText {
-				return fmt.Errorf("anthropic stream interrupted after partial reply — please retry: %w", sErr)
+				return mc.Fail(0, fmt.Errorf("anthropic stream interrupted after partial reply — please retry: %w", sErr))
 			}
-			return fmt.Errorf("anthropic stream read: %w", sErr)
+			return mc.Fail(0, fmt.Errorf("anthropic stream read: %w", sErr))
 		}
 		if lastErr != nil {
-			return fmt.Errorf("anthropic stream read: %w", lastErr)
+			return mc.Fail(0, fmt.Errorf("anthropic stream read: %w", lastErr))
 		}
+		mc.Done(stopReason, spanUsage(stepIn, stepOut, stepCacheRead, stepCacheCreation))
 
 		totalIn += stepIn
 		totalOut += stepOut

@@ -24,6 +24,8 @@ import (
 	"os"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Cyprinus12138/dialogram/agent"
 	"github.com/Cyprinus12138/dialogram/provider/anthropic"
 	"github.com/Cyprinus12138/dialogram/provider/openai"
@@ -78,9 +80,12 @@ type Deps struct {
 	// step boundary so a crashed turn can be recovered (see
 	// agent.Checkpoint and docs/STREAMING.md).
 	Checkpointer agent.Checkpointer
-	// Guard and Metrics are layered on by New (not NewProvider).
-	Guard   *agent.Guard
-	Metrics *agent.Metrics
+	// Guard, Metrics and TracerProvider are layered on by New (not
+	// NewProvider). A nil TracerProvider uses the global one, which records
+	// nothing until an OpenTelemetry SDK is installed.
+	Guard          *agent.Guard
+	Metrics        *agent.Metrics
+	TracerProvider trace.TracerProvider
 }
 
 // NewProvider builds the raw provider selected by s, WITHOUT the Agent
@@ -120,11 +125,11 @@ func NewProvider(s Settings, d Deps) (agent.Provider, error) {
 }
 
 // New builds the configured provider and wraps it in an Agent with the
-// guard and metrics from d.
+// guard, metrics and tracer provider from d.
 func New(s Settings, d Deps) (*agent.Agent, error) {
 	p, err := NewProvider(s, d)
 	if err != nil {
 		return nil, err
 	}
-	return agent.New(p, agent.Options{Guard: d.Guard, Metrics: d.Metrics}), nil
+	return agent.New(p, agent.Options{Guard: d.Guard, Metrics: d.Metrics, TracerProvider: d.TracerProvider}), nil
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Cyprinus12138/dialogram/agent"
 	"github.com/Cyprinus12138/dialogram/internal/loop"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 )
 
 type toolAcc struct{ ID, Name, Args string }
@@ -51,25 +52,33 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			toolIdxOrder    []int
 			stepIn, stepOut int
 			stepCacheRead   int
+			finishReason    string
 			emittedText     bool
 		)
 
+		// One model-call span covers every attempt of this step; each
+		// retried attempt is a retry event on it.
+		mctx, mc := telemetry.StartModelCall(ctx, telemetry.ModelRequest{
+			Provider: p.Name(), Model: p.model, Step: step + 1, Stream: true, MaxTokens: p.maxTokens, BaseURL: p.baseURL,
+		})
 		var lastErr error
 		for attempt := 0; attempt <= loop.MaxStreamRetries; attempt++ {
 			if attempt > 0 {
 				slog.Info("openai stream retry", "step", step, "attempt", attempt, "prev_err", lastErr)
 				if err := loop.WaitBackoff(ctx, attempt); err != nil {
-					return err
+					return mc.Fail(0, err)
 				}
 			}
+			mc.Attempt()
 			contentBuf.Reset()
 			toolCalls = map[int]*toolAcc{}
 			toolIdxOrder = nil
 			stepIn, stepOut, stepCacheRead = 0, 0, 0
+			finishReason = ""
 
-			req, err := p.newRequest(ctx, body, true)
+			req, err := p.newRequest(mctx, body, true)
 			if err != nil {
-				return err
+				return mc.Fail(0, err)
 			}
 			started := time.Now()
 			resp, err := p.http.Do(req)
@@ -77,9 +86,10 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 				slog.Warn("openai stream failed", "err", err, "attempt", attempt, "duration_ms", time.Since(started).Milliseconds())
 				if loop.IsTransientStreamErr(err) && attempt < loop.MaxStreamRetries && !emittedText {
 					lastErr = err
+					mc.Retry(0, err)
 					continue
 				}
-				return fmt.Errorf("openai stream request: %w", err)
+				return mc.Fail(0, fmt.Errorf("openai stream request: %w", err))
 			}
 			if resp.StatusCode != 200 {
 				raw, _ := io.ReadAll(resp.Body)
@@ -87,9 +97,10 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 				slog.Warn("openai stream non-200", "status", resp.StatusCode, "body", string(raw))
 				if loop.Retryable(resp.StatusCode) && attempt < loop.MaxStreamRetries && !emittedText {
 					lastErr = fmt.Errorf("openai %d", resp.StatusCode)
+					mc.Retry(resp.StatusCode, lastErr)
 					continue
 				}
-				return fmt.Errorf("openai %d: %s", resp.StatusCode, string(raw))
+				return mc.Fail(resp.StatusCode, fmt.Errorf("openai %d: %s", resp.StatusCode, string(raw)))
 			}
 
 			scanner := bufio.NewScanner(resp.Body)
@@ -134,6 +145,9 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 					continue
 				}
 				ch := chunk.Choices[0]
+				if ch.FinishReason != "" {
+					finishReason = ch.FinishReason
+				}
 				if ch.Delta.Content != "" {
 					contentBuf.WriteString(ch.Delta.Content)
 					emit(agent.StreamEvent{Type: agent.EventText, Delta: ch.Delta.Content})
@@ -166,16 +180,18 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 			if loop.IsTransientStreamErr(sErr) && attempt < loop.MaxStreamRetries && !emittedText {
 				lastErr = sErr
 				slog.Warn("openai stream read transient, retrying", "err", sErr, "attempt", attempt)
+				mc.Retry(0, sErr)
 				continue
 			}
 			if emittedText {
-				return fmt.Errorf("openai stream interrupted after partial reply — please retry: %w", sErr)
+				return mc.Fail(0, fmt.Errorf("openai stream interrupted after partial reply — please retry: %w", sErr))
 			}
-			return fmt.Errorf("openai stream read: %w", sErr)
+			return mc.Fail(0, fmt.Errorf("openai stream read: %w", sErr))
 		}
 		if lastErr != nil {
-			return fmt.Errorf("openai stream read: %w", lastErr)
+			return mc.Fail(0, fmt.Errorf("openai stream read: %w", lastErr))
 		}
+		mc.Done(finishReason, telemetry.Usage{Input: stepIn, Output: stepOut, CacheRead: stepCacheRead})
 
 		totalIn += stepIn
 		totalOut += stepOut

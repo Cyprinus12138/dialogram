@@ -11,6 +11,7 @@ import (
 
 	"github.com/Cyprinus12138/dialogram/agent"
 	"github.com/Cyprinus12138/dialogram/internal/loop"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 )
 
 type ctxT = context.Context
@@ -56,32 +57,51 @@ func (p *Provider) requestBody(st turnState, msgs []message, stream bool) []byte
 	return b
 }
 
-// call performs one non-streaming request and decodes the response.
+// call performs one non-streaming request under a model-call span and
+// decodes the response. step is 0-based; the synthesis request passes
+// MaxSteps.
 func (p *Provider) call(ctx context.Context, body []byte, phase string, step int) (response, error) {
 	var parsed response
+	ctx, mc := telemetry.StartModelCall(ctx, telemetry.ModelRequest{
+		Provider: p.Name(), Model: p.model, Step: step + 1, MaxTokens: p.maxTokens, BaseURL: p.baseURL,
+	})
+	mc.Attempt()
 	req, err := p.newRequest(ctx, body, false)
 	if err != nil {
-		return parsed, err
+		return parsed, mc.Fail(0, err)
 	}
 	started := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
 		slog.Warn("anthropic request failed", "phase", phase, "step", step, "err", err, "duration_ms", time.Since(started).Milliseconds())
-		return parsed, fmt.Errorf("anthropic request: %w", err)
+		return parsed, mc.Fail(0, fmt.Errorf("anthropic request: %w", err))
 	}
 	raw, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	slog.Debug("anthropic response", "phase", phase, "step", step, "status", resp.StatusCode, "bytes", len(raw), "duration_ms", time.Since(started).Milliseconds())
 	if resp.StatusCode != http200 {
-		return parsed, fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(raw))
+		return parsed, mc.Fail(resp.StatusCode, fmt.Errorf("anthropic %d: %s", resp.StatusCode, string(raw)))
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return parsed, fmt.Errorf("anthropic decode: %w (body=%s)", err, string(raw))
+		return parsed, mc.Fail(0, fmt.Errorf("anthropic decode: %w (body=%s)", err, string(raw)))
 	}
 	if parsed.Error != nil {
-		return parsed, fmt.Errorf("anthropic api error: %s — %s", parsed.Error.Type, parsed.Error.Message)
+		return parsed, mc.Fail(0, fmt.Errorf("anthropic api error: %s — %s", parsed.Error.Type, parsed.Error.Message))
 	}
+	var u telemetry.Usage
+	if parsed.Usage != nil {
+		u = spanUsage(parsed.Usage.InputTokens, parsed.Usage.OutputTokens,
+			parsed.Usage.CacheReadInputTokens, parsed.Usage.CacheCreationInputTokens)
+	}
+	mc.Done(parsed.StopReason, u)
 	return parsed, nil
+}
+
+// spanUsage converts Messages API usage to span usage. Anthropic reports
+// input_tokens without the cache counters; the conventions' input count
+// includes them (docs/gen-ai/anthropic.md in the GenAI semconv repo).
+func spanUsage(in, out, cacheRead, cacheCreation int) telemetry.Usage {
+	return telemetry.Usage{Input: in + cacheRead + cacheCreation, Output: out, CacheRead: cacheRead, CacheWrite: cacheCreation}
 }
 
 const http200 = 200
@@ -177,7 +197,7 @@ func (p *Provider) synthesizeFinal(ctx context.Context, st turnState, turns []ag
 		body["system"] = sys
 	}
 	b, _ := json.Marshal(body)
-	parsed, err := p.call(ctx, b, "synthesis", 0)
+	parsed, err := p.call(ctx, b, "synthesis", st.profile.MaxSteps())
 	if err != nil {
 		return "", 0, 0, 0, 0, err
 	}

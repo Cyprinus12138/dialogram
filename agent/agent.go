@@ -12,6 +12,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 )
 
 // ChatMessage is the legacy flat history shape: one text message per turn.
@@ -186,27 +191,38 @@ const (
 )
 
 // Agent wraps a Provider with the cross-cutting layers that belong above the
-// wire protocol: the honesty Guard and turn metrics. HTTP layers should talk
-// to an Agent, not to a Provider directly.
+// wire protocol: the honesty Guard, turn metrics and the run's root trace
+// span. HTTP layers should talk to an Agent, not to a Provider directly.
 type Agent struct {
 	provider Provider
 	guard    *Guard
 	metrics  *Metrics
+	tracer   trace.Tracer
 }
 
 // Options are the optional layers New installs around a Provider. A zero
-// Options is valid: no guard, no metrics.
+// Options is valid: no guard, no metrics, spans from the global
+// TracerProvider (a no-op until an OpenTelemetry SDK is installed).
 type Options struct {
 	// Guard, when non-nil, redacts un-grounded regulated figures from
 	// replies (see Guard). nil disables guarding entirely.
 	Guard *Guard
 	// Metrics, when non-nil, receives per-turn budget signals.
 	Metrics *Metrics
+	// TracerProvider is the source of each run's root span; the model-call
+	// and tool spans under it come from the same provider. nil uses
+	// otel.GetTracerProvider(), which records nothing until an SDK is
+	// installed. See docs/OBSERVABILITY.md for the span model.
+	TracerProvider trace.TracerProvider
 }
 
 // New wraps p with the given options.
 func New(p Provider, opts Options) *Agent {
-	return &Agent{provider: p, guard: opts.Guard, metrics: opts.Metrics}
+	tp := opts.TracerProvider
+	if tp == nil {
+		tp = otel.GetTracerProvider()
+	}
+	return &Agent{provider: p, guard: opts.Guard, metrics: opts.Metrics, tracer: tp.Tracer(telemetry.Scope)}
 }
 
 // Provider returns the underlying provider's name.
@@ -218,29 +234,49 @@ func (a *Agent) Model() string { return a.provider.Model() }
 // Underlying returns the wrapped Provider.
 func (a *Agent) Underlying() Provider { return a.provider }
 
-// Chat runs one non-streaming turn, then applies the guard (if any) and
-// records metrics.
+// Chat runs one non-streaming turn under the run span, then applies the
+// guard (if any) and records metrics.
 func (a *Agent) Chat(ctx context.Context, in ChatInput) (*ChatOutput, error) {
+	ctx, span := a.startRun(ctx, in)
 	out, err := a.provider.Chat(ctx, in)
 	if err != nil {
+		endRun(span, err)
 		return out, err
 	}
 	if a.guard != nil {
-		a.guard.GuardReply(in.Turns, out)
+		if reds := a.guard.GuardReply(in.Turns, out); len(reds) > 0 {
+			redactedEvent(span, reds[0].Kind, len(reds))
+		}
 	}
 	if a.metrics != nil && out != nil {
 		a.metrics.ObserveTurn(in.Profile, a.provider.Name(), out.ToolSteps(),
 			EstOutputTokens(out.Reply), out.CacheReadTokens, out.CacheCreationTokens)
 	}
+	// A non-streaming pause leaves the pausing tool_use unanswered; any
+	// other successful return is the end of the assistant's turn.
+	if span.IsRecording() && out != nil && len(DanglingToolUses(out.Turns)) == 0 {
+		span.AddEvent(telemetry.EventDone)
+	}
+	endRun(span, nil)
 	return out, nil
 }
 
-// ChatStream runs one streaming turn. When a Guard is installed, text deltas
-// are held and re-emitted at each assistant turn boundary so an un-grounded
-// figure is redacted from both the live stream and the persisted turn
-// snapshot before either reaches the client.
+// ChatStream runs one streaming turn under the run span. When a Guard is
+// installed, text deltas are held and re-emitted at each assistant turn
+// boundary so an un-grounded figure is redacted from both the live stream
+// and the persisted turn snapshot before either reaches the client.
 func (a *Agent) ChatStream(ctx context.Context, in ChatInput, emit EmitFn) error {
+	ctx, span := a.startRun(ctx, in)
 	e := emit
+	if span.IsRecording() {
+		inner := e
+		e = func(ev StreamEvent) {
+			if ev.Type == EventDone {
+				span.AddEvent(telemetry.EventDone)
+			}
+			inner(ev)
+		}
+	}
 	var acc Accumulator
 	if a.metrics != nil {
 		inner := e
@@ -250,12 +286,15 @@ func (a *Agent) ChatStream(ctx context.Context, in ChatInput, emit EmitFn) error
 		}
 	}
 	if a.guard != nil {
-		e = a.guard.WrapEmit(in.Turns, e)
+		e = a.guard.wrapEmit(in.Turns, e, func(reds []Redaction) {
+			redactedEvent(span, reds[0].Kind, len(reds))
+		})
 	}
 	err := a.provider.ChatStream(ctx, in, e)
 	if err == nil && a.metrics != nil && !acc.Paused {
 		a.metrics.ObserveTurn(in.Profile, a.provider.Name(), CountAssistantTurns(acc.Turns),
 			acc.OutputTokens, acc.CacheReadTokens, acc.CacheCreationTokens)
 	}
+	endRun(span, err)
 	return err
 }

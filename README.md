@@ -9,12 +9,16 @@ Extracted from [ProProp](https://proprop.algonavis.com/), an AI property advisor
 
 ## What it does
 
-- **One conversation shape, two providers.** Conversations are persisted as a provider-neutral block IR (text / tool_use / tool_result). A turn started on OpenAI can be resumed on Anthropic, and a paused tool call can be resumed later, because neither wire format is baked into the stored state. `provider/anthropic` and `provider/openai` are thin adapters over one shared loop.
-- **Tool results split into three channels.** A tool returns an `Envelope`: *what the model hears* (`model_observation`), *what the user sees* (`ui_payload`, rendered inline as a chart or table), and *what the server keeps* (`runtime_state`, the raw rows, addressable through opaque artifact handles). The model asks for a table to be shown by handle; the rows never enter its context.
+- **One conversation shape, two providers.** Conversations are persisted as a provider-neutral block IR (text / tool_use / tool_result / image). A turn started on OpenAI can be resumed on Anthropic, and a paused tool call can be resumed later, because neither wire format is baked into the stored state. `provider/anthropic` and `provider/openai` are thin adapters over one shared loop, and both run end to end in CI against recorded wire-format fixtures, cross-provider resume and image turns included, with no network or API key.
+- **Tool results split into three channels.** A tool returns an `Envelope`: *what the model hears* (`model_observation`), *what the user sees* (`ui_payload`, rendered inline as a chart or table), and *what the server keeps* (`runtime_state`, the raw rows, addressable through opaque artifact handles). The model asks for a table to be shown by handle; the rows never enter its context. An envelope can also be marked untrusted: its observation then reaches the model fenced as data, not as instructions.
+- **Policy from annotations.** Tools carry MCP-style hints (`ReadOnly`, `Destructive`, `Idempotent`, `OpenWorld`). `agent.PolicyInterceptor` turns them into pause or deny decisions in the same interceptor chain as the approval list. The hints never reach the model.
+- **Tool calls with limits, turns that survive a crash.** The default `tool.LocalExecutor` gives each call a timeout, recovers panics, caps the bytes the model reads back and bounds how many calls run at once. Timeouts and panics reach the model as soft failures. A `Checkpointer` saves the turns at every step boundary, and `CloseDangling` pairs unanswered calls after a crash so the conversation continues on either provider. There is no sandbox: isolation belongs to the tool.
+- **MCP servers as tool sources.** `tool/mcp` connects to a server over stdio or streamable HTTP and registers its tools under a per-server prefix. Server annotations map onto the policy hints, and results from servers you do not operate can be fenced as untrusted.
 - **Human-in-the-loop as tools.** `request_user_input`, `request_user_choice` and `request_user_form` end the turn and wait; an interceptor chain can pause any tool for approval; applications add their own pause tools. Mixed turns (a pause co-requested with real tools) run the real tools and defer the pause deterministically instead of dropping work.
 - **Streams that survive the connection.** The model call is a detached server-side producer writing to a `streambuf.Store` (memory or Redis). The HTTP connection is disposable: a client reconnects with the last `id:` it saw and gets exactly the events it missed. Tab switches, radio sleep and load-balancer hops stop losing replies.
 - **Prompt-cache aware.** The stable system prompt, the tool list and the growing conversation each carry a cache breakpoint; the per-turn volatile context is sent as a separate un-cached block so state drift does not bust the cache.
 - **An honesty guard you can measure.** `agent.Guard` redacts regulated figures stated on a turn with no *successful* grounding tool call. The `eval` package ships the paired before/after harness that measured the first version of this guard in production and found it did nothing — and the two lessons that fixed it are built in.
+- **Traces and metrics per run.** Every `Chat` / `ChatStream` is an OpenTelemetry span tree following the GenAI semantic conventions: an `invoke_agent` run span, a `chat {model}` span per upstream request with token and cache usage, and an `execute_tool {name}` span per tool call with its outcome (success, soft failure, timeout, panic, denied). The sse producer joins the trace of the request that launched it. Nothing is recorded until you install an SDK. Opt-in Prometheus metrics track the per-turn budgets the eval harness asserts.
 - **Skills on demand.** `SKILL.md` bundles are advertised as one-line summaries and loaded through a `load_skill` tool, so the stable prompt stays small.
 
 ```
@@ -25,6 +29,27 @@ browser ── POST /chat/stream?message_id=X&since=N ──▶ sse.Handler ─�
                                               agent.Agent.ChatStream ── provider loop ── Append(X, event)
                                               (guard · metrics)        (tools · pauses · cache breakpoints)
 ```
+
+## How it compares
+
+dialogram is a single-agent runtime: one tool loop, its transport and its persisted state. It is not a LangChain-style integration library, and it is not a graph orchestrator.
+
+**Vercel AI SDK** (TypeScript)
+- Shared: tool approval that ends the call, typed UI parts per tool result, a separate model-facing view of tool output, resumable streams.
+- dialogram adds: a stored IR both adapters resume from, per-tool timeouts and output caps, annotation-driven policy, an eval harness.
+- dialogram lacks: the AI SDK's provider list, its React, Vue and Svelte integrations, the JavaScript ecosystem.
+
+**OpenAI Agents SDK** (Python, JS/TS)
+- Shared: approval interruptions with serialisable run state, MCP over stdio and streamable HTTP, per-call tool timeouts, tracing.
+- dialogram adds: a resumable stream transport, a UI channel for tool results, annotation-driven policy, an eval harness that needs no platform.
+- dialogram lacks: handoffs and agents-as-tools, general guardrails, session backends, hosted MCP tools, realtime voice.
+
+**Eino** (Go)
+- Shared: Go, interrupt and resume through a pluggable checkpoint store, MCP tools, callback hooks.
+- dialogram adds: a resumable stream transport, the three-channel envelope, annotation policy and provenance fencing, the measured honesty guard.
+- dialogram lacks: graphs and workflows, multi-agent, retrieval components, the eino-ext integration catalogue.
+
+[docs/COMPARISON.md](docs/COMPARISON.md) covers nine projects and four protocols, with a capability matrix and sources. "Adds" means not found in the other project's own docs as read on 2026-10-23.
 
 ## Quickstart
 
@@ -93,7 +118,7 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 
 | Package | What it is |
 |---|---|
-| `agent` | Block IR, `Provider` contract, `Agent` wrapper, profiles, interceptors, pause detection, skills, the honesty `Guard`, opt-in Prometheus metrics |
+| `agent` | Block IR, `Provider` contract, `Agent` wrapper, profiles, interceptors, pause detection, skills, the honesty `Guard`, opt-in Prometheus metrics, OpenTelemetry run spans (`Options.TracerProvider`) |
 | `tool` | `Tool`, `Registry`, the three-channel `Envelope`, `ArtifactStore`, built-in tools (HITL ×3, `present_data`, `render_from_ref`, `now`) |
 | `tool/mcp` | MCP client as a tool source: `Connect` to a server over stdio or streamable HTTP, `Register` its tools under a per-server prefix, results mapped to the registry's shapes |
 | `provider/anthropic`, `provider/openai` | Wire adapters: translators, streaming parsers, cache breakpoints, retries |
@@ -111,7 +136,9 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 - [docs/SKILLS.md](docs/SKILLS.md) — SKILL.md bundles and on-demand loading
 - [docs/MCP.md](docs/MCP.md) — MCP servers as tool sources: transports, registration, result mapping, the isolation stance
 - [docs/EVAL.md](docs/EVAL.md) — the three-layer evaluation harness
+- [docs/COMPARISON.md](docs/COMPARISON.md) — how dialogram relates to nine agent frameworks and four protocols, gaps included
 - [docs/HONESTY_AB.md](docs/HONESTY_AB.md) — how to measure an honesty guard, and what the first measurement taught
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Prometheus metrics and the OpenTelemetry span model
 
 ## Status
 

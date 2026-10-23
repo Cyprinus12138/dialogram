@@ -102,6 +102,28 @@ All notable changes to this project are documented here. The format follows
   `MessagesToTurns` / `TurnsToMessages` round-trip the client-held history
   through the block IR, and `NewHandler` streams one run per request as
   `data:` frames. `examples/agui` serves a weather tool over it.
+- OpenTelemetry tracing, following the GenAI semantic conventions. The
+  `Agent` wrapper opens an `invoke_agent` run span per `Chat` / `ChatStream`
+  (`agent.Options.TracerProvider`, `dialogram.Deps.TracerProvider`; nil uses
+  the global provider, a no-op until an SDK is installed). Under it, both
+  adapters emit a `chat {model}` span per upstream request (usage, cache
+  counters, finish reason; retries are `retry` events on one span) and the
+  loop emits an `execute_tool {name}` span per tool call with
+  `dialogram.tool.outcome` (success, soft_failure, hard_failure, timeout,
+  panic, denied). The run span carries `checkpoint`, `waiting_for_user`,
+  `guard.redacted` and `done` events. Child spans use the run span's
+  TracerProvider from the context. `sse` runs the detached producer under
+  the launching request's span context, stamps `dialogram.message_id` on
+  request spans and links a tailing request to the run's launch.
+  `agent.InstrumentationName` is the scope name. Depends on
+  `go.opentelemetry.io/otel` v1.46.0 (API only; the SDK is test-only).
+  `docs/OBSERVABILITY.md` describes the metrics and the span model.
+- `docs/COMPARISON.md`: dialogram next to the Vercel AI SDK, OpenAI Agents
+  SDK, Pydantic AI, LangGraph, Claude Agent SDK, Google ADK, Eino, Genkit Go
+  and langchaingo, and against AG-UI, MCP, OpenAI Responses background mode
+  and Agent Skills: per-project notes, a capability matrix, the gaps stated
+  plainly and sources checked on 2026-10-23. The README gains a short
+  "How it compares" section.
 
 ### Changed (relative to the production code this was extracted from)
 - Grounding is outcome-aware: a tool call whose result carries

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Cyprinus12138/dialogram/agent"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 	"github.com/Cyprinus12138/dialogram/tool"
 )
 
@@ -60,6 +61,13 @@ type Dispatched struct {
 // block and reason with nil results; the caller short-circuits the step.
 // Tools are assumed independent — a tool that needs a prior tool's result
 // in the same turn has to be issued by the model in a separate turn anyway.
+//
+// Every result Dispatch produces gets one execute_tool span, a child of
+// the span in ctx: an executed call's span starts once it holds a
+// semaphore slot (the wait is dialogram.tool.queue_ms) and wraps the
+// executor call; a denied call's span is a zero-work one with outcome
+// denied. The span's context reaches the executor, so spans a tool starts
+// nest under it.
 func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.Registry, exec tool.Executor, blocks []agent.Block) (results []Dispatched, pauseBlock *agent.Block, pauseReason string) {
 	type job struct {
 		block   agent.Block
@@ -108,29 +116,34 @@ func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.R
 		results[i].RawJSON = j.rawJSON
 		if j.denied != "" {
 			results[i].Out = j.denied
+			_, span := telemetry.StartTool(ctx, j.block.ToolName, j.block.ToolUseID, 0)
+			telemetry.EndTool(span, j.denied, nil)
 			continue
 		}
 		wg.Add(1)
 		go func(i int, j job) {
 			defer wg.Done()
+			queued := time.Now()
+			var err error
 			select {
 			case sem <- struct{}{}:
+				defer func() { <-sem }()
+				// Do not start new work on a context that ended while
+				// this call was queued; fail it the same way.
+				err = ctx.Err()
 			case <-ctx.Done():
-				results[i].Out = HardFailureJSON(ctx.Err())
-				return
+				err = ctx.Err()
 			}
-			defer func() { <-sem }()
-			// Do not start new work on a context that ended while this
-			// call was queued; fail it the same way.
-			if err := ctx.Err(); err != nil {
-				results[i].Out = HardFailureJSON(err)
-				return
+			spanCtx, span := telemetry.StartTool(ctx, j.block.ToolName, j.block.ToolUseID, time.Since(queued))
+			var out string
+			if err == nil {
+				callCtx := tool.WithCallContext(spanCtx, j.block.ToolUseID, store)
+				out, err = exec.Execute(callCtx, tool.Call{ToolUseID: j.block.ToolUseID, Name: j.block.ToolName, Input: json.RawMessage(j.rawJSON)})
 			}
-			callCtx := tool.WithCallContext(ctx, j.block.ToolUseID, store)
-			out, err := exec.Execute(callCtx, tool.Call{ToolUseID: j.block.ToolUseID, Name: j.block.ToolName, Input: json.RawMessage(j.rawJSON)})
 			if err != nil {
 				out = HardFailureJSON(err)
 			}
+			telemetry.EndTool(span, out, err)
 			results[i].Out = out
 		}(i, j)
 	}

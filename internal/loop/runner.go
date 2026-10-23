@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Cyprinus12138/dialogram/agent"
+	"github.com/Cyprinus12138/dialogram/internal/telemetry"
 	"github.com/Cyprinus12138/dialogram/tool"
 )
 
@@ -58,8 +59,35 @@ func HasToolUse(t agent.Turn) bool {
 // When emit is non-nil (streaming), tool_call events fire for every regular
 // tool up front in model order, then one tool_result per result. A non-nil
 // pause means the provider must stop the loop after emitting usage and the
-// pause event (streaming) or return the text so far (non-streaming).
+// pause event (streaming) or return the text so far (non-streaming). On
+// both paths a pause is recorded as a waiting_for_user event on the span
+// in ctx.
 func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit agent.EmitFn) (toolTurn agent.Turn, traces []agent.ToolTrace, pause *agent.StreamEvent) {
+	toolTurn, traces, pause = r.handleTools(ctx, assistantTurn, emit)
+	if pause != nil {
+		telemetry.Event(ctx, telemetry.EventWaitingForUser,
+			telemetry.PauseKind.String(pause.Kind),
+			telemetry.ToolName.String(pauseToolName(assistantTurn, pause)),
+			telemetry.ToolCallID.String(pause.ToolUseID))
+	}
+	return toolTurn, traces, pause
+}
+
+// pauseToolName is the name of the tool a pause event stands for. Built-in
+// HITL pauses leave the event's Name empty, so it is looked up by id.
+func pauseToolName(t agent.Turn, ev *agent.StreamEvent) string {
+	if ev.Name != "" {
+		return ev.Name
+	}
+	for _, b := range t.Blocks {
+		if b.Type == agent.BlockToolUse && b.ToolUseID == ev.ToolUseID {
+			return b.ToolName
+		}
+	}
+	return ""
+}
+
+func (r Runner) handleTools(ctx context.Context, assistantTurn agent.Turn, emit agent.EmitFn) (toolTurn agent.Turn, traces []agent.ToolTrace, pause *agent.StreamEvent) {
 	isPause := r.Cfg.IsPauseTool
 	exec := r.executor()
 	pauseBlocks, regular := agent.SplitPauseTurn(assistantTurn, isPause)
@@ -104,6 +132,7 @@ func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit 
 // tool_result), so it holds the assistant turn's calls at the first
 // boundary and nothing at the second. A Save error is logged, never
 // returned — checkpointing is a durability aid, not a correctness gate.
+// Each save is a checkpoint event on the span in ctx.
 func (r Runner) Checkpoint(ctx context.Context, messageID string, step int, run []agent.Turn) {
 	if r.Checkpointer == nil {
 		return
@@ -115,7 +144,12 @@ func (r Runner) Checkpoint(ctx context.Context, messageID string, step int, run 
 		Pending:   agent.DanglingToolUses(run),
 		At:        time.Now(),
 	}
-	if err := r.Checkpointer.Save(ctx, cp); err != nil {
+	err := r.Checkpointer.Save(ctx, cp)
+	if err != nil {
 		slog.Warn("checkpoint save failed", "message_id", messageID, "step", step, "err", err)
+		telemetry.Event(ctx, telemetry.EventCheckpoint, telemetry.Step.Int(step),
+			telemetry.CheckpointPending.Int(len(cp.Pending)), telemetry.CheckpointError.String(err.Error()))
+		return
 	}
+	telemetry.Event(ctx, telemetry.EventCheckpoint, telemetry.Step.Int(step), telemetry.CheckpointPending.Int(len(cp.Pending)))
 }

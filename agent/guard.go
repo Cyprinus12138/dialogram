@@ -391,6 +391,12 @@ func (g *Guard) GuardReply(history []Turn, out *ChatOutput) []Redaction {
 // re-hydrated views identical. Token-level streaming is traded for the
 // guarantee; install a Guard only on surfaces where that trade is right.
 func (g *Guard) WrapEmit(history []Turn, emit EmitFn) EmitFn {
+	return g.wrapEmit(history, emit, nil)
+}
+
+// wrapEmit is WrapEmit with a hook that sees each turn's redactions; the
+// Agent uses it to put a guard.redacted event on the run span.
+func (g *Guard) wrapEmit(history []Turn, emit EmitFn, onRedact func([]Redaction)) EmitFn {
 	if g == nil {
 		return emit
 	}
@@ -425,6 +431,9 @@ func (g *Guard) WrapEmit(history []Turn, emit EmitFn) EmitFn {
 				if reds := g.redactTurnTextBlocks(ev.Turn, grounded); len(reds) > 0 {
 					g.logger().Warn("honesty guard redacted un-grounded figure", "kind", kind, "spans", len(reds))
 					text = assistantText(ev.Turn.Blocks)
+					if onRedact != nil {
+						onRedact(reds)
+					}
 				}
 			}
 			if text != "" {
