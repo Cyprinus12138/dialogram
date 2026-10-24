@@ -2,23 +2,23 @@
 
 A server-side guard that redacts figures the model states without data is
 easy to write and easy to believe in. This document is about not believing
-in it: how `eval.HonestyRunner` measures a guard, and what the first such
-measurement taught.
+in it: how `eval.HonestyRunner` measures a guard, and the failure modes a
+guard has to be designed against.
 
 ## Background
 
-The runtime this package was extracted from first tried prompt hardening
-against fabrication under pressure (a user pushing three times for "just a
-ballpark"). A live re-run showed the model displacing the fabrication into
-whichever phrasing the prompt had not enumerated. A turn-level guard was
-then added: on a turn with no grounding tool call, a reply that states a
-regulated figure is rewritten to an honest placeholder. It was never
-re-measured, and it emitted no counter.
+Prompt hardening against fabrication under pressure (a user pushing three
+times for "just a ballpark") tends to displace the fabrication rather than
+remove it: the model states the figure in whichever phrasing the prompt did
+not enumerate. A turn-level guard is the engineering answer: on a turn with
+no successful grounding tool call, a reply that states a regulated figure is
+rewritten to an honest placeholder.
 
-The measurement that followed changed the hallucination rate by **zero**:
-over 49 judged turns (41 trap, 8 control) the guard rewrote one turn, and
-that turn was a *grounded* restatement — a false positive. The guard-vs-judge
-confusion matrix read TP 0, FN 23, FP 1, TN 25.
+Such a guard is easy to ship and hard to see working. Whether it fires on
+the turns that actually fabricate, and whether it damages grounded replies,
+only shows up in a paired measurement against an independent judge, which
+reports the guard-vs-judge confusion matrix (TP, FN, FP, TN) alongside the
+hallucination rate before and after the guard.
 
 ## Design of the measurement
 
@@ -49,25 +49,24 @@ guard's regression corpus, replayed in CI for free.
 real tool contracts (names, descriptions, schemas) with bodies swapped for
 fixtures, so the model sees exactly what production shows it.
 
-## What the first measurement found
+## Failure modes to design against
 
-1. **A soft-failed grounding tool still counted as grounding** — 9 of 18
-   leaked turns. The guard checked tool *names*, not *outcomes*. The model
-   called the right tool, got `error_code` back, and stated the figure
-   anyway; the guard treated the turn as grounded and never looked at the
-   text. This was the exact failure class the guard was built for.
-2. **Phrasing displacement past the signatures** — 5 of 18. On no-tool turns
-   the model stated the figure without the context word the regex keyed on,
-   or in a form the signatures did not cover (counts instead of durations,
-   bare arithmetic). Enumerating contexts keeps losing to displacement.
-3. **Out of scope by design** — 4 of 18 turns but the largest share of
-   claims: rule-like facts stated from memory. A regex cannot tell a right
-   rule from a wrong one; those need a verified knowledge base the prompt
-   cites, not a redactor.
-4. **The one redaction was a false positive**: a restated tool-produced
-   minute count, outside the three-digit restatement exemption.
+1. **A soft-failed grounding tool counted as grounding.** A guard that
+   checks tool *names* rather than *outcomes* treats a turn as grounded when
+   the model called the right tool, got `error_code` back, and stated the
+   figure anyway. That is the exact failure the guard exists for.
+2. **Phrasing displacement past the signatures.** On no-tool turns the model
+   states the figure without the context word a regex keys on, or in a form
+   the signatures do not cover (counts instead of durations, bare
+   arithmetic). Enumerating contexts keeps losing to displacement.
+3. **Out of scope by design.** Rule-like facts stated from memory. A regex
+   cannot tell a right rule from a wrong one; those need a verified
+   knowledge base the prompt cites, not a redactor.
+4. **False positives on restatements.** An exemption that covers only some
+   restated numbers (say, three-digit amounts) redacts an honest restatement
+   of another tool-produced number, such as a minute count.
 
-## What is built into `agent.Guard` as a result
+## What is built into `agent.Guard`
 
 - **Grounding means a successful result, not a call.** `ResultIsSuccess`
   rejects any result carrying `error_code` / `soft_failure`, directly or in
@@ -115,5 +114,4 @@ in flight.
 Writing cases: keep traps multi-turn (the pressure pattern is what leaks),
 read every fixture figure from a real data source so a judge's
 "unsupported" can never mean "implausible fixture", and include a few
-controls that are *meant* to be red until the restatement exemption is
-right.
+controls that a too-narrow restatement exemption would fail.

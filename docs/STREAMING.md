@@ -268,7 +268,7 @@ to the loop.
 |---------------------------------|--------------|---------------------------------------------------|
 | Tab hidden then visible         | Yes          | `visibilitychange` + resume with `since`          |
 | Client network drop             | Yes          | fetch throws → retry with same id, updated since  |
-| Tab closed entirely             | Producer runs to completion; result held for TTL  |
+| Tab closed entirely             | Yes, within the buffer TTL | Producer runs to completion; result held for TTL |
 | Provider error before any text  | Yes          | provider-level retry (429/5xx/network, ×2)        |
 | Provider error after text       | No (partial) | error frame; partial text persisted by `OnFinish` |
 | Upstream hangs silently         | Yes          | idle watchdog → error frame                       |

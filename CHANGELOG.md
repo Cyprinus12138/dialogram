@@ -202,13 +202,9 @@ All notable changes to this project are documented here. The format follows
   sample and the projects are fictional.
 
 ### Changed (relative to the production code this was extracted from)
-- Grounding is outcome-aware: a tool call whose result carries
-  `error_code` / `soft_failure` no longer vouches for a figure
-  (`agent.ResultIsSuccess`). This closes the largest leak class the
-  production A/B measured.
 - The restatement exemption applies to any number a tool produced with at
   least `Guard.MinRestatementDigits` digits (default 2), not only to
-  three-digit amounts — the one observed false positive.
+  three-digit amounts.
 - Metrics are opt-in and registered on a caller-supplied registry under the
   `dialogram_agent_*` names; nothing auto-registers.
 - Tool visibility is a per-profile allow-list plus a per-turn override,

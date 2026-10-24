@@ -7,8 +7,8 @@ teams of agents, and it is not a catalogue of integrations.
 
 This page sets it beside nine agent frameworks and four protocols. Every
 claim about another project comes from that project's own docs or repository,
-read on 2026-10-23 and listed under [Sources](#sources). Where I could not
-confirm something, the text says "not verified". "dialogram adds" means the
+read on 2026-10-23 or on the later dates noted below, and listed under
+[Sources](#sources). Where I could not confirm something, the text says "not verified". "dialogram adds" means the
 feature is not on the pages I read for that project. That is not proof that
 the project lacks it, and these projects change quickly.
 
@@ -16,7 +16,7 @@ the project lacks it, and these projects change quickly.
 
 - A provider-neutral block IR (text, tool_use, tool_result, image). The same
   stored conversation runs on the Anthropic Messages API and on any
-  OpenAI-compatible Chat Completions endpoint, and recorded-fixture replay
+  OpenAI-compatible Chat Completions endpoint, and hand-written-fixture replay
   tests exercise the resume from one to the other.
 - One shared loop with parallel tool dispatch through a `tool.Executor`. The
   default executor applies a per-tool timeout, recovers panics, caps the
@@ -36,7 +36,7 @@ the project lacks it, and these projects change quickly.
 - Agent Skills (`SKILL.md`) in the specification's three tiers: a catalog in
   the stable prompt, then instructions and bundled files through
   `load_skill`, with a strict validator for CI.
-- An honesty guard and the paired A/B harness that measured it.
+- An honesty guard and the paired A/B harness that measures it.
 - An `eval` package: deterministic loop evals, a grounding checker,
   LLM-as-judge scenarios, manifest pins and budgets.
 - MCP servers as tool sources over stdio and streamable HTTP.
@@ -129,7 +129,7 @@ works with any OTLP backend, Pydantic Evals, MCP, AG-UI and Vercel AI event
 streams, Pydantic Graph, and durable execution on eight engines: Temporal,
 DBOS, Prefect, Restate, AWS Lambda, Absurd, pgtask and Airflow. dialogram adds
 a resumable stream buffer with cursor resume, the three-channel envelope with
-artifact handles, and the honesty guard with its measured A/B. None of these
+artifact handles, and the honesty guard with its A/B harness. None of these
 appear on the pages I read. dialogram lacks structured output, durable-engine
 integrations (its `Checkpointer` is the seam an engine would plug into, not
 an integration), graph control flow and Pydantic AI's provider list.
@@ -336,8 +336,8 @@ system of its own. Loading is lenient where the guide recommends it (a name
 that breaks the rules, an unknown field, an unquoted colon) and fails on a
 skill that cannot load. `agent.ValidateSkills` applies the reference
 validator's strict checks. Long instructions and files are paged rather than
-cut. Loading the 19 skills in github.com/anthropics/skills (2026-10-24), all
-load and every bundled text file reads back whole; the strict check flags one
+cut. All 19 skills in github.com/anthropics/skills loaded in the 2026-10-24 check,
+and every bundled text file could be read in full; the strict check flags one
 description over the 1024-character limit. dialogram does not run bundled
 scripts and does not enforce `allowed-tools`, which the specification leaves
 to each client.
@@ -368,7 +368,7 @@ does not mean the project lacks it.
 
 ## Sources
 
-All pages read on 2026-10-23.
+Pages read on 2026-10-23 unless a later date is noted above or below.
 
 dialogram: this repository (README.md, CHANGELOG.md, docs/*.md, `go doc`
 for `agent`, `tool`, `tool/mcp`, `sse`, `streambuf`, `eval`, `agui`, and

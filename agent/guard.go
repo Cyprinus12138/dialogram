@@ -18,13 +18,12 @@ import (
 // answer that nonetheless states a figure matching one of the Signatures is
 // treated as fabricated and the span is replaced with an honest placeholder.
 //
-// Two lessons from measuring a first version of this guard in production
-// are built in:
+// Two rules are built in:
 //
 //   - Grounding means a SUCCESSFUL result, not a call. A tool whose output
 //     carries error_code / soft_failure vouches for nothing; the model
-//     stating a figure after a soft-failed lookup is the single largest
-//     leak class, and a name-only check cannot see it (ResultIsSuccess).
+//     stating a figure after a soft-failed lookup is a common leak, and a
+//     name-only check cannot see it (ResultIsSuccess).
 //   - Restating a number a tool actually produced is honest. Every numeric
 //     token of at least MinRestatementDigits digits found in a tool result
 //     or tool input earlier in the conversation is exempt from redaction.
