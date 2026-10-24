@@ -286,7 +286,9 @@ the OpenAI Agent SDK as in progress.
 ### MCP
 
 dialogram is an MCP client (`tool/mcp`, see [MCP.md](MCP.md)) over stdio and
-streamable HTTP, built on the official Go SDK. The 2025-06-18 specification
+streamable HTTP, built on the official Go SDK (v1.8.0), which negotiates
+protocol version 2026-07-28 with servers that support it. The 2025-06-18
+specification
 defines four tool annotation hints with defaults `readOnlyHint: false`,
 `destructiveHint: true`, `idempotentHint: false` and `openWorldHint: true`. It
 says clients MUST treat annotations as untrusted unless they come from
@@ -296,9 +298,14 @@ the opt-in for the cautious reading; MCP.md explains why. Results from
 servers registered `Untrusted` are fenced as data before the model reads
 them. The spec also tells clients to implement timeouts and confirm sensitive
 operations, which the per-call timeout and `PolicyInterceptor` cover. Gaps:
-dialogram uses tools only, not prompts, resources or sampling. It has no MCP
-server mode and no legacy SSE transport, and image and audio parts become
-placeholders.
+dialogram uses tools only, not prompts, resources, sampling or roots. It does
+not answer elicitation, a server asking the user for input in the middle of
+a call: under 2026-07-28 the call returns input requests the client must
+answer and retry with, and dialogram reports that call as a hard failure.
+It has no MCP server mode, no legacy SSE transport and no built-in OAuth
+flow (a remote server gets fixed headers or a caller-supplied
+`http.Client`), it does not follow `notifications/tools/list_changed`, and
+image and audio parts become placeholders.
 
 ### OpenAI Responses API background mode
 

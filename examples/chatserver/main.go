@@ -1,8 +1,10 @@
-// Command chatserver is a runnable reference deployment of dialogram: a
-// travel-assistant chat with resumable streaming, inline charts and tables,
-// human-in-the-loop choices, an approval-gated tool, an Agent Skills package
-// and an in-memory conversation store. It is deliberately small — read it top to bottom to
-// see how the pieces fit, then replace the store and the tools with yours.
+// Command chatserver is a runnable reference deployment of dialogram: a chat
+// assistant for trips and Singapore property with resumable streaming, inline
+// charts and tables, human-in-the-loop choices, an approval-gated tool, an
+// application-defined pause, an Agent Skills package and an in-memory
+// conversation store. The property tools in property.go are adapted from
+// ProProp. It is deliberately small — read it top to bottom to see how the
+// pieces fit, then replace the store and the tools with yours.
 //
 //	ANTHROPIC_API_KEY=… go run ./examples/chatserver
 //	OPENAI_API_KEY=… LLM_PROVIDER=openai go run ./examples/chatserver
@@ -43,13 +45,15 @@ var static embed.FS
 //go:embed skills
 var skillFiles embed.FS
 
-const systemPrompt = `You are a concise travel assistant. You help with weather, flights and bookings for a trip.
+const systemPrompt = `You are a concise assistant for two things: trips (weather, flights, bookings) and Singapore residential property (HDB resale prices and trends, stamp duty, a shortlist of projects).
 
 Rules:
-- Only state figures (temperatures, fares, times) that a tool result supplies. If a tool fails or returns nothing, say so and offer a next step. Never estimate from memory.
-- When the user's destination or date is ambiguous, ask with request_user_choice (or request_user_input) instead of guessing.
-- After search_flights returns an artifact ref, show the options with render_from_ref (comparison_table) rather than retyping rows. Use present_data for small summaries (metric_cards, bar_chart).
+- Only state figures (temperatures, fares, times, prices, psf, duty) that a tool result supplies. If a tool fails or returns nothing, say so and offer a next step. Never estimate from memory.
+- Compute stamp duty with calc_bsd and calc_absd, never by hand.
+- When the user's destination, date or town is ambiguous, ask with request_user_choice (or request_user_input) instead of guessing.
+- After search_flights or lookup_hdb_resale_comps returns an artifact ref, show the rows with render_from_ref (comparison_table) rather than retyping them. Use present_data for small summaries (metric_cards, bar_chart).
 - book_flight needs the user's approval; call it when the user has picked a flight.
+- When the user shows clear interest in a named project, you may call propose_shortlist with just its name; the server shows the user the project's facts.
 - Reply in the user's language. Keep answers short.`
 
 // ---------------- demo tools ----------------
@@ -206,9 +210,10 @@ type pending struct {
 }
 
 type conversation struct {
-	ID      string       `json:"id"`
-	Turns   []agent.Turn `json:"turns"`
-	Pending *pending     `json:"pending,omitempty"`
+	ID        string           `json:"id"`
+	Turns     []agent.Turn     `json:"turns"`
+	Pending   *pending         `json:"pending,omitempty"`
+	Shortlist []shortlistEntry `json:"shortlist,omitempty"`
 }
 
 type store struct {
@@ -249,7 +254,24 @@ func (s *store) snapshot(id string) (conversation, bool) {
 	}
 	cp := *c
 	cp.Turns = append([]agent.Turn(nil), c.Turns...)
+	cp.Shortlist = append([]shortlistEntry(nil), c.Shortlist...)
 	return cp, true
+}
+
+// clientTurns copies turns for the browser: every tool result in its client
+// view, without the runtime_state the store keeps.
+func clientTurns(turns []agent.Turn) []agent.Turn {
+	out := make([]agent.Turn, len(turns))
+	for i, t := range turns {
+		t.Blocks = append([]agent.Block(nil), t.Blocks...)
+		for j := range t.Blocks {
+			if t.Blocks[j].Type == agent.BlockToolResult {
+				t.Blocks[j].ToolResult = tool.ClientView(t.Blocks[j].ToolResult)
+			}
+		}
+		out[i] = t
+	}
+	return out
 }
 
 // missingAnswer names what a /chat/respond body lacks for the pause kind,
@@ -268,8 +290,21 @@ func missingAnswer(kind string, req respondBody) string {
 		if len(req.Answers) == 0 {
 			return "answers is required"
 		}
+	case agent.PauseKindCustom:
+		if len(req.Selected) == 0 {
+			return "selected is required"
+		}
 	}
 	return ""
+}
+
+// newGuard is the honesty guard GUARD=1 installs: figures need a successful
+// call to one of the data tools, and the shortlist pause's input is checked
+// like the reply because the user reads it.
+func newGuard() *agent.Guard {
+	g := agent.NewGuard("get_weather", "search_flights", "lookup_hdb_resale_comps", "psf_trend_series", "calc_bsd", "calc_absd")
+	g.PauseTools = map[string]bool{shortlistToolName: true}
+	return g
 }
 
 // ---------------- server ----------------
@@ -303,6 +338,11 @@ func buildDeps() (dialogram.Deps, *agent.MemCheckpointer, error) {
 	reg.Register(weatherTool())
 	reg.Register(flightsTool())
 	reg.Register(bookTool())
+	reg.Register(resaleCompsTool())
+	reg.Register(psfTrendTool())
+	reg.Register(bsdTool())
+	reg.Register(absdTool())
+	reg.Register(shortlistTool())
 
 	// Skills: the catalog goes into the cached system prompt, and the model
 	// loads a skill's instructions and bundled files through load_skill.
@@ -315,6 +355,9 @@ func buildDeps() (dialogram.Deps, *agent.MemCheckpointer, error) {
 	cfg := &agent.Config{
 		Profiles:       map[string]agent.Profile{"assistant": {SystemPrompt: systemPrompt, MaxToolSteps: 8}},
 		DefaultProfile: "assistant",
+		// The loop pauses on these instead of running them; /chat/respond
+		// answers them.
+		PauseTools: []string{shortlistToolName},
 	}
 	// Step checkpoints: the loop hands the block IR here at every step
 	// boundary, so a turn that dies mid-way can be closed with
@@ -379,7 +422,15 @@ func (a app) routes() http.Handler {
 		// Second meta frame: the conversation id, so a client that created a
 		// fresh conversation learns it from the stream itself.
 		emit(agent.StreamEvent{Type: agent.EventMeta, Message: conv.ID, Provider: a.ag.Provider(), Model: a.ag.Model()})
-		return a.ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant", MessageID: msgID}, emit)
+		return a.ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant", MessageID: msgID}, func(ev agent.StreamEvent) {
+			// The shortlist card shows the project as the table has it.
+			// Set on the event, it is also what the pending row keeps, so
+			// a reload shows the same card.
+			if ev.Type == agent.EventWaitingForUser && ev.Name == shortlistToolName {
+				ev.Message = shortlistCard(ev.Input)
+			}
+			emit(ev)
+		})
 	}
 
 	onFinish := func(_ context.Context, r sse.Result) {
@@ -463,6 +514,16 @@ func (a app) routes() http.Handler {
 			result, _ = json.Marshal(map[string]any{"selected": req.Selected, "other_text": req.OtherText})
 		case agent.PauseKindHITLForm:
 			result, _ = json.Marshal(map[string]any{"answers": req.Answers})
+		case agent.PauseKindCustom:
+			// propose_shortlist is the example's one application pause tool:
+			// on accept the server resolves the project and keeps it.
+			entry, body := shortlistAnswer(p.ToolInput, req.Selected[0] == "accept")
+			if entry != nil {
+				db.mu.Lock()
+				conv.Shortlist = append(conv.Shortlist, *entry)
+				db.mu.Unlock()
+			}
+			result = body
 		default:
 			result, _ = json.Marshal(map[string]any{"user_response": req.Response})
 		}
@@ -499,6 +560,7 @@ func (a app) routes() http.Handler {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		c.Turns = clientTurns(c.Turns)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(c)
 	})
@@ -516,7 +578,7 @@ func main() {
 		os.Exit(1)
 	}
 	if os.Getenv("GUARD") != "" {
-		deps.Guard = agent.NewGuard("get_weather", "search_flights")
+		deps.Guard = newGuard()
 	}
 	ag, err := dialogram.New(dialogram.SettingsFromEnv(), deps)
 	if err != nil {

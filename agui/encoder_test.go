@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -400,5 +401,28 @@ func TestEncoderWellFormedProperty(t *testing.T) {
 		if t.Failed() {
 			t.Fatalf("sequence %d: %+v", i, seq)
 		}
+	}
+}
+
+func TestEncoderKeepsRuntimeStateOnTheServer(t *testing.T) {
+	e := testEncoder()
+	events := drive(e, []agent.StreamEvent{
+		{Type: agent.EventToolResult, Name: "search", ToolUseID: "dg_1", Output: `{"model_observation":{"n":2},"runtime_state":{"secret_rows":[1,2]}}`},
+		{Type: agent.EventDone},
+	})
+	for _, ev := range events {
+		if ev.Type == EventToolCallResult && (strings.Contains(ev.Content, "secret_rows") || !strings.Contains(ev.Content, `"model_observation":{"n":2}`)) {
+			t.Errorf("TOOL_CALL_RESULT content: %s", ev.Content)
+		}
+	}
+	for _, m := range e.log {
+		if strings.Contains(m.Content, "secret_rows") {
+			t.Errorf("the snapshot log keeps runtime_state: %s", m.Content)
+		}
+	}
+	msgs := TurnsToMessages([]agent.Turn{{Role: agent.RoleTool, Blocks: []agent.Block{{Type: agent.BlockToolResult, ToolUseID: "dg_1", ToolName: "search",
+		ToolResult: json.RawMessage(`{"model_observation":{"n":2},"runtime_state":{"secret_rows":[1,2]}}`)}}}})
+	if len(msgs) != 1 || strings.Contains(msgs[0].Content, "secret_rows") {
+		t.Errorf("TurnsToMessages: %+v", msgs)
 	}
 }

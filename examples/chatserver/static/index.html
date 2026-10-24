@@ -108,7 +108,7 @@ function renderPause(ev) {
     box.appendChild($("p", null, ev.message || `${ev.name} needs your approval`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2)));
     const row = $("div", "chips"); const yes = $("button", null, "Approve"); yes.type = "button"; yes.onclick = () => submit({ approved: true }); const no = $("button", "ghost", "Deny"); no.type = "button"; no.onclick = () => submit({ approved: false }); row.append(yes, no); box.appendChild(row);
   } else if (kind === "custom") {
-    box.appendChild($("p", null, `${ev.name} proposed:`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2)));
+    if (ev.message) box.appendChild($("p", null, ev.message)); else { box.appendChild($("p", null, `${ev.name} proposed:`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2))); }
     const row = $("div", "chips"); for (const v of ["accept", "skip"]) { const b = $("button", v === "skip" ? "ghost" : null, v); b.type = "button"; b.onclick = () => submit({ selected: [v] }); row.appendChild(b); } box.appendChild(row);
   } else {
     box.appendChild($("p", null, ev.message || "The assistant has a question")); const i = $("input"); const ok = $("button", null, "Answer"); ok.type = "button"; ok.onclick = () => submit({ response: i.value }); box.append(i, ok);

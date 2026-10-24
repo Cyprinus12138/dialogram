@@ -82,6 +82,19 @@ fixtures, so the model sees exactly what production shows it.
   tools ground which kind (`KindGrounding`).
 - **Fire rate is observable** through the redactions `GuardReply` returns
   and the warnings it logs, instead of a silent rewrite.
+- **Text the user reads in a pause is checked like the reply.** The input of
+  a pause tool (the built-in human-in-the-loop tools, plus any listed in
+  `Guard.PauseTools`) is written by the model for the user: a question, the
+  options, a proposal card. It is redacted with the reply, in the persisted
+  `tool_use` block and in the `waiting_for_user` event alike, and its
+  numbers never count as grounded, so a figure cannot be slipped into a
+  pause and then restated as if a tool had produced it.
+
+What the guard cannot do is point 3 above: a qualitative claim ("a
+non-mature estate") is not a figure, and no signature sees it. Where such a
+claim would land on something the user acts on, take the field away from
+the model. `examples/chatserver`'s `propose_shortlist` takes only a project
+name, and the card the user sees is built from the server's project record.
 
 ## Running it
 

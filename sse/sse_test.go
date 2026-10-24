@@ -234,7 +234,8 @@ func TestCancel_FinalisesAsDone(t *testing.T) {
 func TestGenUI_ConversionAndPause(t *testing.T) {
 	var res Result
 	var mu sync.Mutex
-	env, _ := json.Marshal(tool.Envelope{ModelObservation: map[string]any{"n": 1}, UIPayload: &tool.UIPayload{Component: "bar_chart", Data: map[string]any{"data": []any{}}}})
+	env, _ := json.Marshal(tool.Envelope{ModelObservation: map[string]any{"n": 1}, UIPayload: &tool.UIPayload{Component: "bar_chart", Data: map[string]any{"data": []any{}}},
+		RuntimeState: map[string]any{"secret_rows": []int{1, 2}}})
 	produce := func(ctx context.Context, msgID string, body []byte, emit agent.EmitFn) error {
 		emit(agent.StreamEvent{Type: agent.EventToolCall, Name: tool.PresentDataToolName, ToolUseID: "p", Input: json.RawMessage(`{"type":"metric_cards"}`)})
 		emit(agent.StreamEvent{Type: agent.EventToolResult, Name: tool.PresentDataToolName, ToolUseID: "p", Input: json.RawMessage(`{"type":"metric_cards"}`), Output: `{"displayed":true}`})
@@ -247,6 +248,9 @@ func TestGenUI_ConversionAndPause(t *testing.T) {
 	_, fs := post(t, srv.URL+"/chat/stream?message_id=m4", `{"m":1}`)
 	if got := types(fs); got != "meta,gen_ui,tool_call,gen_ui,tool_result,waiting_for_user" {
 		t.Fatalf("frames = %s", got)
+	}
+	if out := fs[4].Data.Output; strings.Contains(out, "secret_rows") || !strings.Contains(out, `"model_observation":{"n":1}`) {
+		t.Errorf("the tool_result frame carries the envelope without runtime_state: %s", out)
 	}
 	if string(fs[1].Data.GenUI) != `{"type":"metric_cards"}` || !strings.Contains(string(fs[3].Data.GenUI), "bar_chart") || fs[3].Data.Name != "get_weather" {
 		t.Fatalf("gen_ui payloads wrong: %+v", fs)

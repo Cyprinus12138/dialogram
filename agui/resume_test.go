@@ -675,3 +675,14 @@ func TestResultCacheShareAndExpire(t *testing.T) {
 		t.Error("an expired entry runs again")
 	}
 }
+
+func TestResumeApprovedResultLeavesRuntimeStateOnTheServer(t *testing.T) {
+	exec := &fakeExec{out: `{"model_observation":{"booking":"ABC123"},"runtime_state":{"card_number":"4111"}}`}
+	s := &script{runs: [][]agent.StreamEvent{approvalPause}}
+	_, srv := newResumeServer(t, s, exec)
+	in, history := interrupted(t, doRun(t, srv.URL, runBody("t1", "r1", []json.RawMessage{userMsg}, nil)))
+	second := doRun(t, srv.URL, runBody("t1", "r2", history, []ResumeEntry{{InterruptID: in.ID, Status: ResumeResolved, Payload: raw(`{"approved":true}`)}}))
+	if c := nth(t, second, 1).Content; strings.Contains(c, "card_number") || !strings.Contains(c, "ABC123") {
+		t.Errorf("the approved result goes out without runtime_state: %s", c)
+	}
+}

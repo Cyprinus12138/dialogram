@@ -89,7 +89,7 @@ context. `Options.RunTimeout` (default 5 min) bounds a run.
 | `meta` (later) | `CUSTOM "meta"` | value `{message_id, message, provider, model}`, empty fields omitted |
 | `text` | `TEXT_MESSAGE_START` on the first delta of a segment, `TEXT_MESSAGE_CONTENT` per delta | one assistant message id per contiguous text segment; empty deltas are dropped (the spec requires a non-empty delta) |
 | `tool_call` | `TEXT_MESSAGE_END` (if a segment is open), `TOOL_CALL_START` + `TOOL_CALL_ARGS` + `TOOL_CALL_END` | one `TOOL_CALL_ARGS` carries the complete JSON input — dialogram announces whole inputs, never argument deltas |
-| `tool_result` | `TOOL_CALL_RESULT` (+ `CUSTOM "gen_ui"`) | `content` = the tool output verbatim, `role` = `tool`, fresh `messageId`. A result whose envelope carries `ui_payload`, or a `present_data` result, adds a `CUSTOM "gen_ui"` with that payload — the same derivation `sse` does |
+| `tool_result` | `TOOL_CALL_RESULT` (+ `CUSTOM "gen_ui"`) | `content` = the tool output without its `runtime_state` (`tool.ClientView`), `role` = `tool`, fresh `messageId`. A result whose envelope carries `ui_payload`, or a `present_data` result, adds a `CUSTOM "gen_ui"` with that payload — the same derivation `sse` does |
 | `gen_ui` | `CUSTOM "gen_ui"` | `value` = the payload verbatim; deduplicated per tool-use id against the derived one |
 | `usage` | `CUSTOM "usage"` | value `{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model?, provider?, breakdown?}` |
 | `waiting_for_user` | `TEXT_MESSAGE_END` (if open), the pause tool's `TOOL_CALL_START/ARGS/END` (unless already announced), `CUSTOM "waiting_for_user"`, `MESSAGES_SNAPSHOT`, `RUN_FINISHED` with an interrupt outcome | see *Interrupts and resuming* |

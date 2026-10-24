@@ -194,8 +194,11 @@ func (e *Encoder) Push(ev agent.StreamEvent) []Event {
 		out = append(out, e.closeMessage()...)
 		out = append(out, e.toolCall(ev.ToolUseID, ev.Name, ev.Input)...)
 		msgID := e.newID()
-		e.log = append(e.log, Message{ID: msgID, Role: RoleTool, ToolCallID: ev.ToolUseID, Content: ev.Output})
-		out = append(out, Event{Type: EventToolCallResult, MessageID: msgID, ToolCallID: ev.ToolUseID, Content: ev.Output, Role: RoleTool})
+		// runtime_state is the server's; the client, and the history it
+		// sends back, get the rest of the envelope.
+		content := string(tool.ClientView(json.RawMessage(ev.Output)))
+		e.log = append(e.log, Message{ID: msgID, Role: RoleTool, ToolCallID: ev.ToolUseID, Content: content})
+		out = append(out, Event{Type: EventToolCallResult, MessageID: msgID, ToolCallID: ev.ToolUseID, Content: content, Role: RoleTool})
 		out = append(out, e.genUI(ev.ToolUseID, uiPayload(ev))...)
 		e.turnMsg = ""
 	case agent.EventGenUI:

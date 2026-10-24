@@ -322,7 +322,7 @@ func (h *Handler) resolve(ctx context.Context, threadID string, d decision) resu
 		r.msg.Content = agent.DeniedResultJSON(reason)
 	case d.ref.kind == agent.PauseKindApproval:
 		r.executed = true
-		r.msg.Content = h.approved.do(threadID+"\x00"+d.entry.InterruptID, func() string {
+		r.msg.Content = clientView(h.approved.do(threadID+"\x00"+d.entry.InterruptID, func() string {
 			args := json.RawMessage(bytes.TrimSpace(d.call.args))
 			if len(args) == 0 {
 				args = json.RawMessage("{}")
@@ -334,7 +334,7 @@ func (h *Handler) resolve(ctx context.Context, threadID string, d decision) resu
 			defer cancel()
 			h.opts.Logger.Info("agui resume runs an approved tool", "tool", d.call.name, "tool_call_id", d.call.id)
 			return h.execute(execCtx, tool.Call{ToolUseID: d.call.id, Name: d.call.name, Input: args})
-		})
+		}))
 	default:
 		var buf bytes.Buffer
 		_ = json.Compact(&buf, d.entry.Payload)
@@ -479,3 +479,6 @@ func (c *resultCache) store(key, out string) {
 		delete(c.done, oldest)
 	}
 }
+
+// clientView is tool.ClientView for a result held as a string.
+func clientView(out string) string { return string(tool.ClientView(json.RawMessage(out))) }

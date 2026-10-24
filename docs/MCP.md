@@ -193,7 +193,7 @@ tools you wrote, can be registered trusted the way an in-process tool is.
 Descriptions are not fenced — they are the tool spec — so `Allow` and
 `Deny` are the controls for a server whose tool list you have not read.
 
-## Example
+## Examples
 
 ```
 go run ./examples/mcptools -- npx -y @modelcontextprotocol/server-filesystem /tmp
@@ -204,3 +204,43 @@ go run ./examples/mcptools -call filesystem__list_directory -args '{"path":"/tmp
 `examples/mcptools` connects, registers the server's tools and prints the
 registered names and the Anthropic spec; `-call` invokes one tool and
 prints the mapped result.
+
+`examples/mcpagent` puts an agent on top: a terminal chat whose tools all
+come from one server. The server's instructions go into the system prompt,
+and the agent asks `[y/N]` before any call the policy holds: a tool the
+server marks destructive or open-world, a tool it does not annotate
+(`AssumeOpenWorld`), and any tool named with `-approve`. An approved call
+runs through the agent's executor, and the turn resumes with
+`agent.AnswerPause`.
+
+With [sg-property-engine](https://github.com/Cyprinus12138/sg-property-engine)
+serving on its default port, over HTTP or through its stdio server:
+
+```
+OPENAI_API_KEY=… go run ./examples/mcpagent -url http://localhost:8081/mcp -name sgpe
+OPENAI_API_KEY=… go run ./examples/mcpagent -name sgpe -- sgpe mcp --url http://localhost:8081
+```
+
+`-name sgpe` keeps the tool names short (`sgpe__get_project`); without it
+the prefix is the server's advertised name, `sg-property-engine__`. The
+engine's eighteen tools declare themselves read-only and closed-world, so
+none of them asks; `-approve sgpe__private_transactions` shows the approval
+round trip. One question, answered by a local Qwen3.6-27B on vLLM with tool
+calling enabled, results shortened:
+
+```
+> Which district is Meyer Mansion in, which MRT station is nearest, and what has it sold for recently?
+  → sgpe__search_properties {"query": "Meyer Mansion"}
+  ← {"rows":[{"district":"15","kind":"project",…
+  → sgpe__get_project {"name": "MEYER MANSION"}
+  → sgpe__nearest_mrt {"near": {"project": "MEYER MANSION"}}
+  → sgpe__private_transactions {"limit": 10, "project": "MEYER MANSION"}
+  ← {"display_name":"Meyer Mansion","district":"15",…
+  ← {"anchor":{"kind":"project",…},"stations":[{"codes":["CC8"],…
+  ← {"limit":10,"rows":[{"area_sqm":120,"contract_date":…
+```
+
+The model resolves the name first, then asks for the project, the station
+and the sales in one step. When it gets a call wrong, the engine's argument
+validation comes back as an `MCP_TOOL_ERROR` the model reads, and its next
+call is corrected.

@@ -74,12 +74,25 @@ A tool that returns `*tool.Envelope` splits its output:
 The whole envelope is persisted in `Block.ToolResult`, so a resume on any
 provider still has the UI replay and the runtime state. Provider translators
 call `tool.ProjectModelObservation` when building the wire request, so the
-model only ever sees the first channel. The streaming layer calls
+model sees `model_observation` and nothing of `ui_payload` or
+`runtime_state`. The `artifacts` manifest is added to an object observation
+as its `artifacts` key, unless the tool already put one there; that is how
+the model learns which handle to pass on. The streaming layer calls
 `tool.ExtractUIPayload` to emit a `gen_ui` frame the moment the tool returns.
 
 This is what keeps a 200-row result out of the context window: the model
 reads a ten-line observation, the user sees a table, and the server holds
 the rows under the tool call's own id.
+
+`runtime_state` does not leave the server either. `tool.ClientView` drops it
+from a tool result, and every transport sends that view: the `sse` handler's
+`tool_result` frames, and the `agui` tool messages (`TOOL_CALL_RESULT`, the
+`MESSAGES_SNAPSHOT`, `TurnsToMessages`). An endpoint of your own that hands
+stored turns to a browser should do the same; `examples/chatserver` does it
+for `GET /conversations/{id}`. The persisted block keeps the whole envelope.
+Under AG-UI the client holds the history, so a later run sees the envelope
+without its rows; `render_from_ref` reads the rows from the `ArtifactStore`,
+not from history, and is not affected.
 
 ## Artifact handles
 

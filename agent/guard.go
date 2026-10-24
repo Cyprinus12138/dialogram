@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+
+	"github.com/Cyprinus12138/dialogram/tool"
 )
 
 // Guard is the turn-level honesty guard.
@@ -26,6 +28,13 @@ import (
 //   - Restating a number a tool actually produced is honest. Every numeric
 //     token of at least MinRestatementDigits digits found in a tool result
 //     or tool input earlier in the conversation is exempt from redaction.
+//
+// A pause tool's input is text the model wrote for the user to read: the
+// question of request_user_choice, a proposal the application shows on a
+// card. The guard checks it like the reply on the same turn and redacts it
+// in the persisted tool_use block and in the waiting_for_user event alike.
+// Its numbers are never counted as grounded, so a figure cannot be
+// laundered through a pause and then restated as if a tool had produced it.
 //
 // The guard is pure and unit-testable; the policy of *where* it runs is
 // Agent's (Agent.Chat redacts the reply and the persisted turns; ChatStream
@@ -52,6 +61,10 @@ type Guard struct {
 	// Placeholder replaces a redacted span when the matching Signature has
 	// none of its own. Defaults to DefaultPlaceholder.
 	Placeholder string
+	// PauseTools names the application pause tools (Config.PauseTools)
+	// whose input is shown to the user. The built-in human-in-the-loop
+	// tools always count.
+	PauseTools map[string]bool
 	// MinRestatementDigits is the minimum digit count for a number harvested
 	// from tool results / inputs to count as "a figure a tool produced" for
 	// the restatement exemption. Defaults to 2. Lower it to 1 to exempt every
@@ -122,6 +135,9 @@ func (g *Guard) minDigits() int {
 	}
 	return g.MinRestatementDigits
 }
+
+// isPause reports whether name is a tool whose input the user reads.
+func (g *Guard) isPause(name string) bool { return tool.IsHITLTool(name) || g.PauseTools[name] }
 
 func (g *Guard) logger() *slog.Logger {
 	if g.Logger != nil {
@@ -249,24 +265,33 @@ func (g *Guard) spanIsRestatement(span string, grounded map[string]bool) bool {
 
 // CollectGroundedNumbers harvests every numeric token of >= minDigits digits
 // from the tool results and tool inputs in turns — the numbers engineering
-// vouched for, which the model may restate on a later no-tool turn.
+// vouched for, which the model may restate on a later no-tool turn. The
+// inputs of the built-in human-in-the-loop tools are skipped: the model
+// wrote them for the user, and nothing vouched for them.
 func CollectGroundedNumbers(turns []Turn, minDigits int) map[string]bool {
+	return (&Guard{MinRestatementDigits: minDigits}).collect(turns)
+}
+
+func (g *Guard) collect(turns []Turn) map[string]bool {
 	set := map[string]bool{}
 	for _, t := range turns {
-		harvestTurn(t, set, minDigits)
+		g.harvest(t, set)
 	}
 	return set
 }
 
-func harvestTurn(t Turn, set map[string]bool, minDigits int) {
+func (g *Guard) harvest(t Turn, set map[string]bool) {
 	for _, b := range t.Blocks {
 		switch b.Type {
 		case BlockToolResult:
-			for _, n := range numbers(string(b.ToolResult), minDigits) {
+			for _, n := range numbers(string(b.ToolResult), g.minDigits()) {
 				set[n] = true
 			}
 		case BlockToolUse:
-			for _, n := range numbers(string(b.ToolInput), minDigits) {
+			if g.isPause(b.ToolName) {
+				continue
+			}
+			for _, n := range numbers(string(b.ToolInput), g.minDigits()) {
 				set[n] = true
 			}
 		}
@@ -293,6 +318,80 @@ func (g *Guard) Redact(text string, grounded map[string]bool) (string, []Redacti
 		})
 	}
 	return text, reds
+}
+
+// pauseText is the text of the pause tool inputs in blocks: every string
+// in them, one per line.
+func (g *Guard) pauseText(blocks []Block) string {
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Type != BlockToolUse || !g.isPause(b.ToolName) {
+			continue
+		}
+		var v any
+		if json.Unmarshal(b.ToolInput, &v) == nil {
+			walkStrings(v, func(s string) string { sb.WriteString(s); sb.WriteByte('\n'); return s })
+		}
+	}
+	return sb.String()
+}
+
+// walkStrings replaces every string in a decoded JSON value with f(s).
+func walkStrings(v any, f func(string) string) any {
+	switch t := v.(type) {
+	case string:
+		return f(t)
+	case []any:
+		for i := range t {
+			t[i] = walkStrings(t[i], f)
+		}
+	case map[string]any:
+		for k := range t {
+			t[k] = walkStrings(t[k], f)
+		}
+	}
+	return v
+}
+
+// redactJSON redacts every string in raw, returning raw itself when nothing
+// changed.
+func (g *Guard) redactJSON(raw json.RawMessage, grounded map[string]bool) (json.RawMessage, []Redaction) {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return raw, nil
+	}
+	var all []Redaction
+	v = walkStrings(v, func(s string) string {
+		red, reds := g.Redact(s, grounded)
+		all = append(all, reds...)
+		return red
+	})
+	if len(all) == 0 {
+		return raw, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return raw, nil
+	}
+	return b, all
+}
+
+// redactPauseInputs redacts the pause tool inputs of turn in place and
+// returns the rewritten inputs by tool_use_id.
+func (g *Guard) redactPauseInputs(turn *Turn, grounded map[string]bool) (map[string]json.RawMessage, []Redaction) {
+	var all []Redaction
+	out := map[string]json.RawMessage{}
+	for i, b := range turn.Blocks {
+		if b.Type != BlockToolUse || !g.isPause(b.ToolName) {
+			continue
+		}
+		if red, reds := g.redactJSON(b.ToolInput, grounded); len(reds) > 0 {
+			turn.Blocks[i].ToolInput = red
+			out[b.ToolUseID] = red
+			all = append(all, reds...)
+		}
+	}
+	return out, all
 }
 
 func assistantText(blocks []Block) string {
@@ -352,7 +451,7 @@ func (g *Guard) GuardReply(history []Turn, out *ChatOutput) []Redaction {
 	if g == nil || out == nil {
 		return nil
 	}
-	grounded := CollectGroundedNumbers(history, g.minDigits())
+	grounded := g.collect(history)
 	var calls []ToolTrace
 	for _, tc := range out.ToolCalls {
 		if tc.Name != "" {
@@ -361,23 +460,34 @@ func (g *Guard) GuardReply(history []Turn, out *ChatOutput) []Redaction {
 		for _, n := range numbers(tc.Output, g.minDigits()) {
 			grounded[n] = true
 		}
+		if g.isPause(tc.Name) {
+			continue
+		}
 		for _, n := range numbers(string(tc.Input), g.minDigits()) {
 			grounded[n] = true
 		}
 	}
-	flagged, kind := g.Flag(out.Reply, calls)
+	shown := out.Reply
+	for _, t := range out.Turns {
+		if t.Role == RoleAssistant {
+			shown += "\n" + g.pauseText(t.Blocks)
+		}
+	}
+	flagged, kind := g.Flag(shown, calls)
 	if !flagged {
 		return nil
 	}
 	red, reds := g.Redact(out.Reply, grounded)
-	if len(reds) == 0 {
-		return nil
-	}
 	out.Reply = red
 	for i := range out.Turns {
 		if out.Turns[i].Role == RoleAssistant {
 			g.redactTurnTextBlocks(&out.Turns[i], grounded)
+			_, preds := g.redactPauseInputs(&out.Turns[i], grounded)
+			reds = append(reds, preds...)
 		}
+	}
+	if len(reds) == 0 {
+		return nil
 	}
 	g.logger().Warn("honesty guard redacted un-grounded figure", "kind", kind, "spans", len(reds))
 	return reds
@@ -400,8 +510,11 @@ func (g *Guard) wrapEmit(history []Turn, emit EmitFn, onRedact func([]Redaction)
 	if g == nil {
 		return emit
 	}
-	grounded := CollectGroundedNumbers(history, g.minDigits())
+	grounded := g.collect(history)
 	var callsSoFar []ToolTrace
+	// Pause inputs redacted at their turn boundary, by tool_use_id, so the
+	// waiting_for_user event that follows shows the same text.
+	pauses := map[string]json.RawMessage{}
 	return func(ev StreamEvent) {
 		switch ev.Type {
 		case EventText:
@@ -417,18 +530,23 @@ func (g *Guard) wrapEmit(history []Turn, emit EmitFn, onRedact func([]Redaction)
 				// A tool turn: record outcomes and harvest its numbers so a
 				// later step in this same call may restate them.
 				callsSoFar = append(callsSoFar, toolResultTraces(ev.Turn.Blocks)...)
-				harvestTurn(*ev.Turn, grounded, g.minDigits())
+				g.harvest(*ev.Turn, grounded)
 				emit(ev)
 				return
 			}
 			// Same-turn tool_use blocks count as grounding for this turn's
 			// text (their outcome is not yet known), and their inputs join
 			// the grounded set.
-			harvestTurn(*ev.Turn, grounded, g.minDigits())
+			g.harvest(*ev.Turn, grounded)
 			calls := append(append([]ToolTrace{}, callsSoFar...), toolUseTraces(ev.Turn.Blocks)...)
 			text := assistantText(ev.Turn.Blocks)
-			if flagged, kind := g.Flag(text, calls); flagged {
-				if reds := g.redactTurnTextBlocks(ev.Turn, grounded); len(reds) > 0 {
+			if flagged, kind := g.Flag(text+"\n"+g.pauseText(ev.Turn.Blocks), calls); flagged {
+				reds := g.redactTurnTextBlocks(ev.Turn, grounded)
+				red, preds := g.redactPauseInputs(ev.Turn, grounded)
+				for id, in := range red {
+					pauses[id] = in
+				}
+				if reds = append(reds, preds...); len(reds) > 0 {
 					g.logger().Warn("honesty guard redacted un-grounded figure", "kind", kind, "spans", len(reds))
 					text = assistantText(ev.Turn.Blocks)
 					if onRedact != nil {
@@ -438,6 +556,18 @@ func (g *Guard) wrapEmit(history []Turn, emit EmitFn, onRedact func([]Redaction)
 			}
 			if text != "" {
 				emit(StreamEvent{Type: EventText, Delta: text})
+			}
+			emit(ev)
+		case EventWaitingForUser:
+			if in, ok := pauses[ev.ToolUseID]; ok {
+				ev.Input = in
+				ev.Message, _ = g.Redact(ev.Message, grounded)
+				opts := make([]ChoiceOption, len(ev.Options))
+				for i, o := range ev.Options {
+					opts[i] = o
+					opts[i].Label, _ = g.Redact(o.Label, grounded)
+				}
+				ev.Options = opts
 			}
 			emit(ev)
 		default:

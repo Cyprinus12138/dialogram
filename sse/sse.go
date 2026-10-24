@@ -517,6 +517,8 @@ func (h *Handler) run(ctx context.Context, ctl *producerCtl, msgID string, body 
 			if ui := tool.ExtractUIPayload(json.RawMessage(ev.Output)); len(ui) > 0 {
 				append_(ctx, agent.StreamEvent{Type: agent.EventGenUI, ToolUseID: ev.ToolUseID, Name: ev.Name, GenUI: ui})
 			}
+			// runtime_state is the server's; the client gets the rest.
+			ev.Output = string(tool.ClientView(json.RawMessage(ev.Output)))
 		}
 		append_(ctx, ev)
 	}

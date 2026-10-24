@@ -321,3 +321,83 @@ func TestAgent_WrapsGuardAndMetrics(t *testing.T) {
 	}
 	_ = json.Marshal
 }
+
+// pauseTurn is an assistant turn of text plus one pause tool call.
+func pauseTurn(text, name, input string) StreamEvent {
+	return StreamEvent{Type: EventTurn, Turn: &Turn{Role: RoleAssistant, Blocks: []Block{
+		{Type: BlockText, Text: text},
+		{Type: BlockToolUse, ToolUseID: "dg_p", ToolName: name, ToolInput: json.RawMessage(input)},
+	}}}
+}
+
+func TestGuard_WrapEmit_RedactsPauseText(t *testing.T) {
+	var got []StreamEvent
+	g := testGuard().WrapEmit(nil, func(ev StreamEvent) { got = append(got, ev) })
+	input := `{"prompt":"Book the package for $3,000?","options":[{"label":"Yes, $3,000","value":"yes"},{"label":"No","value":"no"}]}`
+	turn := pauseTurn("One question first.", "request_user_choice", input)
+	g(turn)
+	// The loop builds the event from the unredacted call.
+	g(StreamEvent{Type: EventWaitingForUser, Kind: PauseKindHITLChoice, ToolUseID: "dg_p", Message: "Book the package for $3,000?",
+		Input:   json.RawMessage(input),
+		Options: []ChoiceOption{{Label: "Yes, $3,000", Value: "yes"}, {Label: "No", Value: "no"}}})
+
+	if in := string(turn.Turn.Blocks[1].ToolInput); strings.Contains(in, "3,000") || !strings.Contains(in, `"value":"yes"`) {
+		t.Errorf("persisted pause input not redacted: %s", in)
+	}
+	w := got[len(got)-1]
+	if w.Type != EventWaitingForUser || strings.Contains(w.Message+string(w.Input)+w.Options[0].Label, "3,000") || w.Options[1].Label != "No" {
+		t.Errorf("the waiting_for_user event must show the same redaction: %+v", w)
+	}
+}
+
+func TestGuard_PauseTextIsNotGrounding(t *testing.T) {
+	var texts []string
+	sink := func(ev StreamEvent) {
+		if ev.Type == EventText {
+			texts = append(texts, ev.Delta)
+		}
+	}
+	// A figure the model put in a pause earlier does not ground the same
+	// figure stated later.
+	history := []Turn{{Role: RoleAssistant, Blocks: []Block{
+		{Type: BlockToolUse, ToolName: "request_user_input", ToolInput: json.RawMessage(`{"prompt":"Is a 20% discount fine?"}`)}}}}
+	g := testGuard().WrapEmit(history, sink)
+	g(textTurn("You will get 20% off."))
+	if len(texts) != 1 || strings.Contains(texts[0], "20%") {
+		t.Errorf("a figure laundered through a pause survived: %q", texts)
+	}
+}
+
+func TestGuard_ApplicationPauseTools(t *testing.T) {
+	reason := `{"project_name":"kestrel gardens","reason":"A non-mature estate with 20% upside."}`
+	run := func(g *Guard) string {
+		turn := pauseTurn("", "propose_shortlist", reason)
+		g.WrapEmit(nil, func(StreamEvent) {})(turn)
+		return string(turn.Turn.Blocks[1].ToolInput)
+	}
+	if got := run(testGuard()); !strings.Contains(got, "20%") {
+		t.Errorf("an unlisted tool's input is an argument and stays: %s", got)
+	}
+	g := testGuard()
+	g.PauseTools = map[string]bool{"propose_shortlist": true}
+	if got := run(g); strings.Contains(got, "20%") || !strings.Contains(got, "kestrel gardens") {
+		t.Errorf("a listed pause tool is checked like the reply: %s", got)
+	}
+}
+
+func TestGuard_GuardReply_RedactsPauseInput(t *testing.T) {
+	out := &ChatOutput{Reply: "One question.", Turns: []Turn{{Role: RoleAssistant, Blocks: []Block{
+		{Type: BlockText, Text: "One question."},
+		{Type: BlockToolUse, ToolName: "request_user_input", ToolInput: json.RawMessage(`{"prompt":"Is $500 a month fine?"}`)}}}},
+		ToolCalls: []ToolTrace{{Name: "request_user_input", Input: json.RawMessage(`{"prompt":"Is $500 a month fine?"}`)}}}
+	if reds := testGuard().GuardReply(nil, out); len(reds) != 1 || strings.Contains(string(out.Turns[0].Blocks[1].ToolInput), "$500") {
+		t.Errorf("redactions %v, input %s", reds, out.Turns[0].Blocks[1].ToolInput)
+	}
+
+	// The same question after a successful grounding call is left alone.
+	out.Turns[0].Blocks[1].ToolInput = json.RawMessage(`{"prompt":"Is $500 a month fine?"}`)
+	out.ToolCalls = append(out.ToolCalls, ToolTrace{Name: "get_fx_rate", Output: `{"rate":1.35}`})
+	if reds := testGuard().GuardReply(nil, out); len(reds) != 0 {
+		t.Errorf("a grounded turn must not be redacted: %v", reds)
+	}
+}

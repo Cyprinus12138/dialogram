@@ -161,6 +161,36 @@ All notable changes to this project are documented here. The format follows
   tool twice, runs approved calls through the agent's executor, and has
   end-to-end tests over its routes.
 
+- `examples/mcpagent`: a terminal agent whose tools all come from one MCP
+  server, over streamable HTTP or stdio. The server's instructions go into
+  the system prompt; destructive, open-world, unannotated and `-approve`d
+  calls ask `[y/N]` first, and an approved call runs through the agent's
+  executor before the turn resumes with `AnswerPause`. docs/MCP.md walks
+  through it against sg-property-engine.
+
+- `tool.ClientView` drops `runtime_state` from a tool result. The `sse`
+  handler's `tool_result` frames and the `agui` tool messages
+  (`TOOL_CALL_RESULT`, the snapshot, `TurnsToMessages`, an approved call's
+  result) now send that view, so the rows the docs call server-only no
+  longer reach the client; `examples/chatserver` applies it to
+  `GET /conversations/{id}`.
+- `agent.Guard` checks the text of a pause the user reads: the input of the
+  built-in human-in-the-loop tools and of the tools in the new
+  `Guard.PauseTools` is redacted with the reply, in the persisted block and
+  in the `waiting_for_user` event, and its numbers no longer count as
+  grounded for the restatement exemption.
+- `examples/chatserver`: Singapore property tools adapted from ProProp.
+  `lookup_hdb_resale_comps` gives the model summary statistics and a
+  three-row sample and keeps the full table behind an artifact handle;
+  `psf_trend_series` returns the monthly median psf with a linear trend and
+  draws it as a line chart; `calc_bsd` and `calc_absd` compute stamp duty
+  on the IRAS rate tables; `propose_shortlist` is an application pause tool
+  (`Config.PauseTools`) that takes only a project name: the card the user
+  sees is built from the project table, and `/chat/respond` stores the
+  resolved record when the user accepts. `GUARD=1` lists it in
+  `Guard.PauseTools`. The market tools run on a generated demo
+  sample and the projects are fictional.
+
 ### Changed (relative to the production code this was extracted from)
 - Grounding is outcome-aware: a tool call whose result carries
   `error_code` / `soft_failure` no longer vouches for a figure
@@ -174,6 +204,10 @@ All notable changes to this project are documented here. The format follows
 - Tool visibility is a per-profile allow-list plus a per-turn override,
   instead of per-tool mode restrictions on the registry.
 - Neutral tool-use ids carry the `dg_` prefix.
+- `tool.ProjectModelObservation` adds an envelope's `artifacts` manifest to
+  the observation the model reads (after the fence for untrusted results),
+  so a handle reaches `render_from_ref` without each tool copying it into
+  `model_observation` by hand.
 - Skills use the Agent Skills format. `name` is the identifier; `id`,
   `version` and the comma-separated `tool_allowlist` are gone (a version
   belongs in `metadata`, tool lists in `allowed-tools`). `load_skill` takes

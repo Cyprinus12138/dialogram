@@ -285,7 +285,7 @@ func TurnsToMessages(turns []agent.Turn) []Message {
 				if b.Type != agent.BlockToolResult {
 					continue
 				}
-				out = append(out, Message{ID: next(), Role: RoleTool, ToolCallID: b.ToolUseID, Content: string(b.ToolResult)})
+				out = append(out, Message{ID: next(), Role: RoleTool, ToolCallID: b.ToolUseID, Content: string(tool.ClientView(b.ToolResult))})
 			}
 		default:
 			var text strings.Builder
