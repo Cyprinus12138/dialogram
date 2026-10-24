@@ -298,11 +298,12 @@ the opt-in for the cautious reading; MCP.md explains why. Results from
 servers registered `Untrusted` are fenced as data before the model reads
 them. The spec also tells clients to implement timeouts and confirm sensitive
 operations, which the per-call timeout and `PolicyInterceptor` cover. Gaps:
-dialogram uses tools only, not prompts, resources, sampling or roots. It does
-not answer elicitation, a server asking the user for input in the middle of
-a call: under 2026-07-28 the call returns input requests the client must
-answer and retry with, and dialogram reports that call as a hard failure.
-It has no MCP server mode, no legacy SSE transport and no built-in OAuth
+dialogram uses tools only, not prompts, resources, sampling or roots.
+Elicitation is answered the 2026-07-28 way: the call's input request
+becomes a pause the user answers, through `sse` or as an AG-UI interrupt,
+and the call is retried with the answer. One elicitation per result is
+answered, and a server on an older protocol that elicits in the middle of
+an open call gets an error. It has no MCP server mode, no legacy SSE transport and no built-in OAuth
 flow (a remote server gets fixed headers or a caller-supplied
 `http.Client`), it does not follow `notifications/tools/list_changed`, and
 image and audio parts become placeholders.

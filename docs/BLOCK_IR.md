@@ -117,6 +117,15 @@ Applications add their own pause tools through `Config.PauseTools`; these
 surface as `PauseKindCustom` with the tool's name and input, and the
 application decides what accepting them means.
 
+A tool can also pause in the middle of a call, when it cannot finish
+without the user: its `Fn` returns `tool.NeedInput(req)`. The request is a
+form (`Mode` `form`, a flat JSON Schema of the answer) or a step at a URL
+(`Mode` `url`), plus a message and a `State` only the tool reads. The loop
+keeps the results of the step's other calls, leaves this one without a
+result, and emits a `PauseKindToolInput` event with the tool's name and
+arguments and the request as `Request`. This is how an MCP server's
+elicitation reaches the user (MCP.md), and any local tool can do the same.
+
 An interceptor can pause any tool for approval (`InterceptPause`): the event
 carries the tool's name and input so the application can dispatch it
 verbatim on approve, or answer it with a `DENIED` result on deny. A turn
@@ -151,6 +160,15 @@ The shape of the result body is a contract between the application and its
 prompt; the example server uses `{"user_response": …}`,
 `{"selected": […], "other_text": …}`, `{"answers": {…}}`, and the
 dispatched tool's own output on approval.
+
+A `tool_input` pause resumes by running the call again with the user's
+answer: `tool.ExecuteWithInput(ctx, exec, call, req, resp)` hands the tool
+its request and a `tool.InputResponse` (`accept` with the form's `content`,
+`decline` or `cancel`) through the context, where it reads them with
+`tool.InputResponseFrom`. The output answers the call through
+`AnswerPause`; when the tool asks again instead, `ExecuteWithInput` returns
+the new request and the conversation stays paused on it, for as many
+rounds as the tool needs.
 
 When the user sends a new message instead of answering, close the pause
 before appending it: `agent.DismissedResultJSON(kind, reason)` reads as a

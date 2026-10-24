@@ -168,6 +168,16 @@ All notable changes to this project are documented here. The format follows
   executor before the turn resumes with `AnswerPause`. docs/MCP.md walks
   through it against sg-property-engine.
 
+- A tool can pause a call for the user's input: `tool.NeedInput` returns a
+  `tool.InputRequest` (a form with a requested schema, or a URL step), the
+  loop pauses with `PauseKindToolInput` and `StreamEvent.Request` while the
+  step's other calls keep their results, and `tool.ExecuteWithInput` runs
+  the call again with a `tool.InputResponse`, for as many rounds as the
+  tool asks. `tool/mcp` answers MCP elicitation this way (2026-07-28 round
+  trips), `sse.Result` carries `PausedRequest`, `agui` raises
+  `input_required` interrupts whose id carries the signed request, and
+  `examples/chatserver` and `examples/mcpagent` answer it in the browser and
+  on the terminal.
 - `tool.ClientView` drops `runtime_state` from a tool result. The `sse`
   handler's `tool_result` frames and the `agui` tool messages
   (`TOOL_CALL_RESULT`, the snapshot, `TurnsToMessages`, an approved call's

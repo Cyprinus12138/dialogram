@@ -207,6 +207,8 @@ type pending struct {
 	ToolName  string          `json:"tool_name,omitempty"`
 	ToolInput json.RawMessage `json:"tool_input,omitempty"`
 	Prompt    string          `json:"prompt,omitempty"`
+	// Request is the tool.InputRequest of a tool_input pause.
+	Request json.RawMessage `json:"request,omitempty"`
 }
 
 type conversation struct {
@@ -294,6 +296,12 @@ func missingAnswer(kind string, req respondBody) string {
 		if len(req.Selected) == 0 {
 			return "selected is required"
 		}
+	case agent.PauseKindToolInput:
+		switch req.Action {
+		case tool.InputAccept, tool.InputDecline, tool.InputCancel:
+		default:
+			return "action must be accept, decline or cancel"
+		}
 	}
 	return ""
 }
@@ -324,6 +332,9 @@ type respondBody struct {
 	OtherText      string                     `json:"other_text"`
 	Answers        map[string]json.RawMessage `json:"answers"`
 	Approved       *bool                      `json:"approved"`
+	// Action and Content answer a tool_input pause (tool.InputResponse).
+	Action  string         `json:"action"`
+	Content map[string]any `json:"content"`
 }
 
 // buildDeps assembles what the agent runs with: the tools, the skills, the
@@ -447,7 +458,7 @@ func (a app) routes() http.Handler {
 		conv.Turns = append(conv.Turns, r.Turns...)
 		conv.Pending = nil
 		if r.Paused {
-			conv.Pending = &pending{ToolUseID: r.PausedToolUseID, Kind: r.PausedKind, ToolName: r.PausedToolName, ToolInput: r.PausedToolInput, Prompt: r.PausedPrompt}
+			conv.Pending = &pending{ToolUseID: r.PausedToolUseID, Kind: r.PausedKind, ToolName: r.PausedToolName, ToolInput: r.PausedToolInput, Prompt: r.PausedPrompt, Request: r.PausedRequest}
 		}
 	}
 
@@ -514,6 +525,30 @@ func (a app) routes() http.Handler {
 			result, _ = json.Marshal(map[string]any{"selected": req.Selected, "other_text": req.OtherText})
 		case agent.PauseKindHITLForm:
 			result, _ = json.Marshal(map[string]any{"answers": req.Answers})
+		case agent.PauseKindToolInput:
+			// The tool asked the user for input: run the call again with the
+			// answer. When it asks once more, the conversation stays paused
+			// on the new question, which goes back in the response.
+			var asked tool.InputRequest
+			_ = json.Unmarshal(p.Request, &asked)
+			out, again, err := tool.ExecuteWithInput(r.Context(), a.exec, tool.Call{ToolUseID: p.ToolUseID, Name: p.ToolName, Input: p.ToolInput},
+				asked, tool.InputResponse{Action: req.Action, Content: req.Content})
+			if again != nil {
+				next := *p
+				next.Prompt, next.Request = again.Message, jsonBody(again)
+				db.mu.Lock()
+				conv.Pending = &next
+				db.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "conversation_id": conv.ID, "waiting": map[string]any{
+					"type": agent.EventWaitingForUser, "kind": next.Kind, "tool_use_id": next.ToolUseID, "name": next.ToolName,
+					"input": next.ToolInput, "message": next.Prompt, "request": next.Request}})
+				return
+			}
+			if err != nil {
+				out = fmt.Sprintf(`{"error_code":%q,"error_message":%q}`, tool.ErrorCodeHardFailure, err.Error())
+			}
+			result = json.RawMessage(out)
 		case agent.PauseKindCustom:
 			// propose_shortlist is the example's one application pause tool:
 			// on accept the server resolves the project and keeps it.

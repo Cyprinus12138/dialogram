@@ -3,7 +3,10 @@
 // tools under a per-server prefix, adds the server's instructions to the
 // system prompt, and asks on the terminal before any call the policy holds:
 // a tool the server marks destructive or open-world, a tool it does not
-// annotate at all, and any tool named with -approve.
+// annotate at all, and any tool named with -approve. When the server asks
+// the user for input in the middle of a call (MCP elicitation), the
+// question is asked on the terminal too, field by field, for as many rounds
+// as the server needs.
 //
 // Against sg-property-engine (https://github.com/Cyprinus12138/sg-property-engine)
 // on its default port, over HTTP or by launching its stdio server:
@@ -30,6 +33,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Cyprinus12138/dialogram"
@@ -234,7 +238,11 @@ func (s *session) ask(ctx context.Context, q string) error {
 // decide answers an approval pause from the terminal: y runs the call
 // through the shared executor, anything else declines it.
 func (s *session) decide(ctx context.Context, acc *agent.Accumulator) json.RawMessage {
-	if acc.PausedKind != agent.PauseKindApproval {
+	switch acc.PausedKind {
+	case agent.PauseKindApproval:
+	case agent.PauseKindToolInput:
+		return s.answerInput(ctx, acc)
+	default:
 		// Not reachable here: this agent registers no pause tools.
 		return json.RawMessage(agent.DismissedResultJSON(acc.PausedKind, ""))
 	}
@@ -249,6 +257,154 @@ func (s *session) decide(ctx context.Context, acc *agent.Accumulator) json.RawMe
 	}
 	fmt.Fprintf(s.out, "  ← %s\n", observation(out))
 	return json.RawMessage(out)
+}
+
+// answerInput asks the user what the server needs to finish the paused
+// call, runs the call again with the answer, and repeats while the server
+// asks again. The final result answers the call.
+func (s *session) answerInput(ctx context.Context, acc *agent.Accumulator) json.RawMessage {
+	var req tool.InputRequest
+	_ = json.Unmarshal(acc.PausedRequest, &req)
+	call := tool.Call{ToolUseID: acc.PausedToolUseID, Name: acc.PausedToolName, Input: acc.PausedToolInput}
+	for {
+		out, again, err := tool.ExecuteWithInput(ctx, s.exec, call, req, s.askUser(acc.PausedToolName, req))
+		if err != nil {
+			out = fmt.Sprintf(`{"error_code":%q,"error_message":%q}`, tool.ErrorCodeHardFailure, err.Error())
+		}
+		if again == nil {
+			fmt.Fprintf(s.out, "  ← %s\n", observation(out))
+			return json.RawMessage(out)
+		}
+		req = *again
+	}
+}
+
+// askUser puts one input request to the user.
+func (s *session) askUser(toolName string, req tool.InputRequest) tool.InputResponse {
+	fmt.Fprintf(s.out, "\n  ? %s asks: %s\n", toolName, req.Message)
+	if req.Mode == tool.InputModeURL {
+		fmt.Fprintf(s.out, "    open %s\n    then type done, decline or cancel: ", req.URL)
+		switch a, _ := s.readLine(); strings.ToLower(a) {
+		case "done", "y", "yes":
+			return tool.InputResponse{Action: tool.InputAccept}
+		case "decline", "n", "no":
+			return tool.InputResponse{Action: tool.InputDecline}
+		}
+		return tool.InputResponse{Action: tool.InputCancel}
+	}
+	fmt.Fprint(s.out, "    answer it? [Y]es, [n]o to decline, [c]ancel: ")
+	switch a, ok := s.readLine(); {
+	case !ok, strings.EqualFold(a, "c"), strings.EqualFold(a, "cancel"):
+		return tool.InputResponse{Action: tool.InputCancel}
+	case strings.EqualFold(a, "n"), strings.EqualFold(a, "no"):
+		return tool.InputResponse{Action: tool.InputDecline}
+	}
+	content := map[string]any{}
+	for _, f := range formFields(req.Schema) {
+		for {
+			fmt.Fprintf(s.out, "    %s: ", f.prompt())
+			line, ok := s.readLine()
+			if !ok {
+				return tool.InputResponse{Action: tool.InputCancel}
+			}
+			if line == "" && !f.required {
+				break
+			}
+			if v, err := f.parse(line); err == nil {
+				content[f.name] = v
+				break
+			} else {
+				fmt.Fprintf(s.out, "    %v\n", err)
+			}
+		}
+	}
+	return tool.InputResponse{Action: tool.InputAccept, Content: content}
+}
+
+// formField is one property of an elicitation schema: MCP restricts them
+// to flat strings, numbers, integers and booleans, strings maybe with an
+// enum.
+type formField struct {
+	name, kind, description string
+	enum                    []string
+	required                bool
+}
+
+func (f formField) prompt() string {
+	p := f.name
+	if f.description != "" {
+		p += " (" + f.description + ")"
+	}
+	switch {
+	case len(f.enum) > 0:
+		p += " [" + strings.Join(f.enum, "/") + "]"
+	case f.kind == "boolean":
+		p += " [y/n]"
+	}
+	if !f.required {
+		p += ", optional"
+	}
+	return p
+}
+
+func (f formField) parse(s string) (any, error) {
+	switch f.kind {
+	case "integer":
+		return strconv.Atoi(s)
+	case "number":
+		return strconv.ParseFloat(s, 64)
+	case "boolean":
+		switch strings.ToLower(s) {
+		case "y", "yes", "true":
+			return true, nil
+		case "n", "no", "false":
+			return false, nil
+		}
+		return nil, errors.New("answer y or n")
+	}
+	if len(f.enum) > 0 && !slices.Contains(f.enum, s) {
+		return nil, fmt.Errorf("pick one of %s", strings.Join(f.enum, ", "))
+	}
+	return s, nil
+}
+
+// formFields reads the properties of schema in the order the server wrote
+// them.
+func formFields(schema json.RawMessage) []formField {
+	var s struct {
+		Properties json.RawMessage `json:"properties"`
+		Required   []string        `json:"required"`
+	}
+	if json.Unmarshal(schema, &s) != nil || len(s.Properties) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(strings.NewReader(string(s.Properties)))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	var out []formField
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		var p struct {
+			Type        string   `json:"type"`
+			Description string   `json:"description"`
+			Title       string   `json:"title"`
+			Enum        []string `json:"enum"`
+		}
+		if dec.Decode(&p) != nil {
+			return out
+		}
+		name := t.(string)
+		desc := p.Description
+		if desc == "" {
+			desc = p.Title
+		}
+		out = append(out, formField{name: name, kind: p.Type, description: desc, enum: p.Enum, required: slices.Contains(s.Required, name)})
+	}
+	return out
 }
 
 // show prints the model's text as it streams, and a line per tool call and

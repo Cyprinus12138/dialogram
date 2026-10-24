@@ -137,6 +137,43 @@ The `error_message` of an `MCP_TOOL_ERROR` is server text, so keep the
 degraded-path instructions in the system prompt about failures short and
 literal.
 
+## Elicitation
+
+A server may ask the user for input in the middle of a call: a form whose
+fields it describes with a flat JSON Schema, or a step at a URL (a sign-in,
+a payment page). Under protocol 2026-07-28 this is a round trip the client
+drives: `tools/call` returns an input-required result with the request and
+an opaque `requestState`, and the client retries the call with the user's
+answer and that state.
+
+`tool/mcp` turns the SDK's automatic round trip off and advertises form
+and URL elicitation. A result that asks for one elicitation becomes
+`tool.NeedInput`: the run pauses with a `tool_input` event carrying the
+server's message, mode, schema or URL, and in the request's `State` the
+request state and the request's id. The application asks the user and runs
+the call again with `tool.ExecuteWithInput`; the client sends the answer
+back as `inputResponses` with the request state. A server may ask several
+times; each round is a pause. See BLOCK_IR.md for the pause, and AGUI.md
+for how it becomes an interrupt.
+
+What is not answered:
+
+| Server asks | Outcome |
+|---|---|
+| several elicitations in one result, or sampling, or roots | `MCP_INPUT_UNSUPPORTED` soft failure |
+| an input-required result with no request (load shedding) | `UPSTREAM_TIMEOUT`, retryable |
+| an elicitation request in the middle of the call, on a protocol older than 2026-07-28 | the request fails, and with it the call |
+
+The last row is a server that negotiated an older protocol, such as one
+behind a stateful streamable HTTP handler, which falls back to 2025-11-25.
+There, elicitation is a request the server sends while the call is open
+and waits on; a paused run cannot hold a call open for a user who may
+answer from another request or another instance. Serve the tools
+statelessly, or over stdio, to get the round-trip form.
+
+A request comes from the server, not the model, and it is shown to the
+user, who sees the registered tool name and so the server it came from.
+
 ## Annotations
 
 MCP servers may annotate tools with behaviour hints (`readOnlyHint`,
@@ -225,7 +262,9 @@ OPENAI_API_KEY=… go run ./examples/mcpagent -name sgpe -- sgpe mcp --url http:
 the prefix is the server's advertised name, `sg-property-engine__`. The
 engine's eighteen tools declare themselves read-only and closed-world, so
 none of them asks; `-approve sgpe__private_transactions` shows the approval
-round trip. One question, answered by a local Qwen3.6-27B on vLLM with tool
+round trip. A server that asks the user for input mid-call (elicitation)
+gets its questions asked on the terminal, field by field. One question,
+answered by a local Qwen3.6-27B on vLLM with tool
 calling enabled, results shortened:
 
 ```

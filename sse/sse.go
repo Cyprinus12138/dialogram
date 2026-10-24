@@ -83,7 +83,9 @@ type Result struct {
 	PausedToolName  string
 	PausedToolInput json.RawMessage
 	PausedPrompt    string
-	Usage           Usage
+	// PausedRequest is the tool.InputRequest of a tool_input pause.
+	PausedRequest json.RawMessage
+	Usage         Usage
 	// Err is the producer's error, if any (nil on cancel).
 	Err error
 	// Cancelled is true when the client stopped the stream.
@@ -466,6 +468,7 @@ func (h *Handler) run(ctx context.Context, ctl *producerCtl, msgID string, body 
 		res.Status = status
 		res.Paused, res.PausedKind, res.PausedToolUseID = acc.Paused, acc.PausedKind, acc.PausedToolUseID
 		res.PausedToolName, res.PausedToolInput, res.PausedPrompt = acc.PausedToolName, acc.PausedToolInput, acc.PausedPrompt
+		res.PausedRequest = acc.PausedRequest
 		res.Usage = Usage{acc.InputTokens, acc.OutputTokens, acc.CacheReadTokens, acc.CacheCreationTokens}
 		res.EmittedText = acc.Text.Len() > 0
 		if res.Err != nil && !res.Cancelled {

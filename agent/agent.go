@@ -163,6 +163,8 @@ type StreamEvent struct {
 	Multiple bool           `json:"multiple,omitempty"`
 	// GenUI carries the structured UI payload for gen_ui events.
 	GenUI json.RawMessage `json:"gen_ui,omitempty"`
+	// Request is the tool.InputRequest of a PauseKindToolInput pause.
+	Request json.RawMessage `json:"request,omitempty"`
 }
 
 // EmitFn receives stream events in order. Providers call it serially.
@@ -188,6 +190,12 @@ const (
 	// tool (Config.PauseTools). The event carries the tool's Name and Input
 	// so the application can render it and resolve it on resume.
 	PauseKindCustom = "custom"
+	// PauseKindToolInput marks a pause raised by a tool that needs the
+	// user's input to finish a call (tool.NeedInput; an MCP server's
+	// elicitation). The event carries the tool's Name and Input, and the
+	// tool.InputRequest as Request; resume with tool.ExecuteWithInput and
+	// agent.AnswerPause.
+	PauseKindToolInput = "tool_input"
 )
 
 // Agent wraps a Provider with the cross-cutting layers that belong above the

@@ -158,6 +158,12 @@ func (p *Provider) Chat(ctx context.Context, in agent.ChatInput) (*agent.ChatOut
 		}
 		toolTurn, traces, pause := p.runner.HandleTools(ctx, assistantTurn, nil)
 		if pause != nil {
+			// A tool_input pause keeps the results of the step's other calls.
+			if len(toolTurn.Blocks) > 0 {
+				trace = append(trace, traces...)
+				turns = append(turns, toolTurn)
+				p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
+			}
 			return result(loop.ExtractText(assistantTurn)), nil
 		}
 		trace = append(trace, traces...)

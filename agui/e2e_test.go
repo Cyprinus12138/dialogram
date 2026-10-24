@@ -3,6 +3,7 @@ package agui_test
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,6 +140,27 @@ func stack(t *testing.T, up *upstream, booked *int) string {
 		},
 		Annotations: tool.Annotations{Destructive: true},
 	})
+	// book_seat asks for a seat, then for payment at a URL, then books.
+	reg.Register(&tool.Tool{
+		Name: "book_seat", Description: "Book a seat.", Schema: tool.Obj(map[string]any{"flight": tool.Str("Flight")}, "flight"),
+		Fn: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			req, resp, ok := tool.InputResponseFrom(ctx)
+			switch {
+			case !ok:
+				return nil, tool.NeedInput(tool.InputRequest{Message: "Which seat?", State: json.RawMessage(`"seat"`),
+					Schema: json.RawMessage(`{"type":"object","properties":{"seat":{"type":"string"}},"required":["seat"]}`)})
+			case resp.Action != tool.InputAccept:
+				return map[string]any{"booked": false, "because": resp.Action}, nil
+			case string(req.State) == `"seat"`:
+				state, _ := json.Marshal(resp.Content["seat"])
+				return nil, tool.NeedInput(tool.InputRequest{Mode: tool.InputModeURL, Message: "Pay for the seat", URL: "https://pay.example/1", State: state})
+			}
+			var seat string
+			_ = json.Unmarshal(req.State, &seat)
+			*booked++
+			return map[string]any{"booked": seat}, nil
+		},
+	})
 	cfg := &agent.Config{Profiles: map[string]agent.Profile{"assistant": {SystemPrompt: "Be brief."}}, DefaultProfile: "assistant"}
 	exec := tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{})
 	ag := agent.New(openai.New(openai.Options{
@@ -235,5 +257,83 @@ func TestEndToEndChoiceThroughTheRealLoop(t *testing.T) {
 	}
 	if !sawResult {
 		t.Errorf("the model reads the user's pick: %v", up.bodies[1]["messages"])
+	}
+}
+
+func TestEndToEndToolInputThroughTheRealLoop(t *testing.T) {
+	up := &upstream{streams: []string{
+		sse("tool_calls", toolCallDelta("book_seat", `{"flight":"SQ1"}`)),
+		sse("stop", `{"role":"assistant","content":"Booked 12A."}`),
+	}}
+	booked := 0
+	url := stack(t, up, &booked)
+	user := json.RawMessage(`{"id":"u1","role":"user","content":"Book me a seat on SQ1."}`)
+
+	in, history := endOnInterrupt(t, postRun(t, url, []json.RawMessage{user}, nil, "r1"))
+	if in.Reason != agui.ReasonInputRequired || in.Message != "Which seat?" || !strings.Contains(string(in.ResponseSchema), `"seat"`) {
+		t.Fatalf("the tool's question is the interrupt: %+v", in)
+	}
+	var meta map[string]agui.InterruptMetadata
+	_ = json.Unmarshal(in.Metadata, &meta)
+	if m := meta[agui.MetadataKey]; m.Kind != agent.PauseKindToolInput || !strings.Contains(string(m.Request), "requested_schema") || strings.Contains(string(m.Request), "state") {
+		t.Errorf("the metadata shows the request, not its state: %+v", m)
+	}
+
+	refused := func(entry agui.ResumeEntry, why string) {
+		t.Helper()
+		events := postRun(t, url, history, []agui.ResumeEntry{entry}, "rx")
+		if last := nth(t, events, len(events)-1); last.Type != agui.EventRunError || last.Code != agui.CodeResumeInvalid {
+			t.Errorf("%s: %+v", why, last)
+		}
+	}
+	refused(agui.ResumeEntry{InterruptID: in.ID, Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept","content":{}}`)}, "a required field is missing")
+	refused(agui.ResumeEntry{InterruptID: in.ID, Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept","content":{"seat":12}}`)}, "a field has the wrong type")
+	// The same request with another state: only the signature can tell.
+	parts := strings.Split(in.ID, ".")
+	signed, _ := base64.RawURLEncoding.DecodeString(parts[4])
+	parts[4] = base64.RawURLEncoding.EncodeToString([]byte(strings.Replace(string(signed), `"state":"seat"`, `"state":"9Z"`, 1)))
+	refused(agui.ResumeEntry{InterruptID: strings.Join(parts, "."), Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept","content":{"seat":"1A"}}`)}, "a forged request")
+
+	second := postRun(t, url, history, []agui.ResumeEntry{{InterruptID: in.ID, Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept","content":{"seat":"12A"}}`)}}, "r2")
+	again, history2 := endOnInterrupt(t, second)
+	if again.ToolCallID != in.ToolCallID || again.ID == in.ID || again.Message != "Pay for the seat" || strings.Contains(string(again.ResponseSchema), "content") {
+		t.Fatalf("the tool asks again, for the payment step: %+v", again)
+	}
+	if len(up.bodies) != 1 || len(history2) != len(history) || booked != 0 {
+		t.Fatalf("no model call and no new messages while the tool waits: %d requests, %d vs %d messages", len(up.bodies), len(history2), len(history))
+	}
+
+	third := postRun(t, url, history2, []agui.ResumeEntry{{InterruptID: again.ID, Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept"}`)}}, "r3")
+	if r := nth(t, third, 1); r.Type != agui.EventToolCallResult || !strings.Contains(r.Content, `"booked":"12A"`) || booked != 1 {
+		t.Fatalf("the last answer books once: %+v, booked %d", r, booked)
+	}
+	if last := nth(t, third, len(third)-1); last.Type != agui.EventRunFinished || last.Outcome != nil {
+		t.Fatalf("the run completes: %+v", last)
+	}
+	var sawResult bool
+	for _, m := range messagesOf(up.bodies[1]) {
+		sawResult = sawResult || (m["role"] == "tool" && m["tool_call_id"] == in.ToolCallID && strings.Contains(m["content"].(string), "12A"))
+	}
+	if !sawResult {
+		t.Errorf("the model reads the booking: %v", up.bodies[1]["messages"])
+	}
+	replay := postRun(t, url, history2, []agui.ResumeEntry{{InterruptID: again.ID, Status: agui.ResumeResolved, Payload: json.RawMessage(`{"action":"accept"}`)}}, "r4")
+	if booked != 1 || !strings.Contains(nth(t, replay, 1).Content, "12A") {
+		t.Errorf("a replayed resume reuses the booking: booked %d, %+v", booked, nth(t, replay, 1))
+	}
+}
+
+func TestEndToEndToolInputCancelled(t *testing.T) {
+	up := &upstream{streams: []string{
+		sse("tool_calls", toolCallDelta("book_seat", `{"flight":"SQ1"}`)),
+		sse("stop", `{"role":"assistant","content":"Not booked."}`),
+	}}
+	booked := 0
+	url := stack(t, up, &booked)
+	user := json.RawMessage(`{"id":"u1","role":"user","content":"Book me a seat."}`)
+	in, history := endOnInterrupt(t, postRun(t, url, []json.RawMessage{user}, nil, "r1"))
+	second := postRun(t, url, history, []agui.ResumeEntry{{InterruptID: in.ID, Status: agui.ResumeCancelled}}, "r2")
+	if r := nth(t, second, 1); r.Type != agui.EventToolCallResult || !strings.Contains(r.Content, `"because":"cancel"`) {
+		t.Fatalf("a cancelled interrupt tells the tool: %+v", r)
 	}
 }

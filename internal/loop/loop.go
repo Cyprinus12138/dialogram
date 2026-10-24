@@ -43,6 +43,9 @@ type Dispatched struct {
 	Block   agent.Block
 	RawJSON string
 	Out     string
+	// Input is set, and Out empty, when the tool asked for the user's
+	// input instead of finishing (tool.NeedInput).
+	Input *tool.InputRequest
 }
 
 // Dispatch runs the interceptor chain on every tool_use block, then
@@ -140,6 +143,11 @@ func Dispatch(ctx context.Context, interceptors []agent.Interceptor, reg *tool.R
 				callCtx := tool.WithCallContext(spanCtx, j.block.ToolUseID, store)
 				out, err = exec.Execute(callCtx, tool.Call{ToolUseID: j.block.ToolUseID, Name: j.block.ToolName, Input: json.RawMessage(j.rawJSON)})
 			}
+			if req, ok := tool.AsInputRequired(err); ok {
+				telemetry.EndTool(span, "", nil)
+				results[i].Input = req
+				return
+			}
 			if err != nil {
 				out = HardFailureJSON(err)
 			}
@@ -234,6 +242,34 @@ func EmitToolResults(emit agent.EmitFn, results []Dispatched) {
 	for _, r := range results {
 		emit(agent.StreamEvent{Type: agent.EventToolResult, Name: r.Block.ToolName, ToolUseID: r.Block.ToolUseID, Input: json.RawMessage(r.RawJSON), Output: r.Out})
 	}
+}
+
+// InputPause takes the calls that asked for the user's input out of
+// results. The rest are answered as usual; the first such call, in model
+// order, becomes the returned tool_input pause, and any other stays without
+// a result for agent.AnswerPause to close as NOT_RUN.
+func InputPause(results []Dispatched) ([]Dispatched, *agent.StreamEvent) {
+	var done []Dispatched
+	var ev *agent.StreamEvent
+	for _, r := range results {
+		if r.Input == nil {
+			done = append(done, r)
+			continue
+		}
+		if ev == nil {
+			req, _ := json.Marshal(r.Input)
+			ev = &agent.StreamEvent{
+				Type:      agent.EventWaitingForUser,
+				Kind:      agent.PauseKindToolInput,
+				ToolUseID: r.Block.ToolUseID,
+				Name:      r.Block.ToolName,
+				Input:     json.RawMessage(r.RawJSON),
+				Message:   r.Input.Message,
+				Request:   req,
+			}
+		}
+	}
+	return done, ev
 }
 
 // ApprovalPauseEvent renders an interceptor pause as its waiting_for_user

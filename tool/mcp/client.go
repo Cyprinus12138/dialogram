@@ -131,7 +131,16 @@ func Connect(ctx context.Context, t Transport, o Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := sdk.NewClient(&sdk.Implementation{Name: clientName, Version: clientVersion}, nil)
+	// Input requests (elicitation) are answered by the user through a
+	// tool_input pause, not by a handler the SDK calls in the middle of the
+	// call, so the SDK's automatic round trip is off. Roots and sampling
+	// are not offered.
+	cl := sdk.NewClient(&sdk.Implementation{Name: clientName, Version: clientVersion}, &sdk.ClientOptions{
+		MultiRoundTrip: &sdk.MultiRoundTripOptions{Disabled: true},
+		Capabilities: &sdk.ClientCapabilities{Elicitation: &sdk.ElicitationCapabilities{
+			Form: &sdk.FormElicitationCapabilities{}, URL: &sdk.URLElicitationCapabilities{},
+		}},
+	})
 	session, err := cl.Connect(ctx, st, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: connect: %w", err)
@@ -301,7 +310,16 @@ func (c *Client) call(parent context.Context, name string, input json.RawMessage
 		ctx, cancel = context.WithTimeout(parent, c.timeout)
 		defer cancel()
 	}
-	res, err := c.session.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: json.RawMessage(args)})
+	params := &sdk.CallToolParams{Name: name, Arguments: json.RawMessage(args)}
+	if req, resp, ok := tool.InputResponseFrom(parent); ok {
+		var st inputState
+		if err := json.Unmarshal(req.State, &st); err != nil || st.InputID == "" {
+			return nil, fmt.Errorf("mcp: %s: call %s: the input request's state is not this client's", c.name, name)
+		}
+		params.RequestState = st.RequestState
+		params.InputResponses = sdk.InputResponseMap{st.InputID: &sdk.ElicitResult{Action: resp.Action, Content: resp.Content}}
+	}
+	res, err := c.session.CallTool(ctx, params)
 	if err != nil {
 		switch {
 		case parent.Err() != nil:
@@ -312,6 +330,9 @@ func (c *Client) call(parent context.Context, name string, input json.RawMessage
 		default:
 			return nil, fmt.Errorf("mcp: %s: call %s: %w", c.name, name, err)
 		}
+	}
+	if res.NeedsInput() {
+		return inputRequired(c.name, name, res)
 	}
 	v, soft := mapResult(res)
 	if untrusted && !soft {
@@ -399,4 +420,39 @@ func hintsOf(a *sdk.ToolAnnotations) Hints {
 		h.OpenWorld = *a.OpenWorldHint
 	}
 	return h
+}
+
+// ErrorCodeInputUnsupported is the soft failure for a server that asks the
+// client for something other than one elicitation at a time.
+const ErrorCodeInputUnsupported = "MCP_INPUT_UNSUPPORTED"
+
+// inputState is what tool.InputRequest.State holds for an MCP call: the
+// server's opaque request state and the id its input request went by.
+type inputState struct {
+	RequestState string `json:"request_state,omitempty"`
+	InputID      string `json:"input_id"`
+}
+
+// inputRequired maps an input-required result. One elicitation becomes a
+// tool_input pause; no request at all is the server shedding load; anything
+// else (sampling, roots, several requests at once) is not supported.
+func inputRequired(server, name string, res *sdk.CallToolResult) (any, error) {
+	if len(res.InputRequests) == 0 {
+		return tool.Soft(tool.ErrorCodeUpstreamTimeout, fmt.Sprintf("%s: %s is busy; try the call again", server, name)), nil
+	}
+	if len(res.InputRequests) == 1 {
+		for id, r := range res.InputRequests {
+			p, ok := r.(*sdk.ElicitParams)
+			if !ok {
+				break
+			}
+			state, _ := json.Marshal(inputState{RequestState: res.RequestState, InputID: id})
+			req := tool.InputRequest{Mode: p.Mode, Message: p.Message, URL: p.URL, State: state}
+			if p.RequestedSchema != nil {
+				req.Schema, _ = json.Marshal(p.RequestedSchema)
+			}
+			return nil, tool.NeedInput(req)
+		}
+	}
+	return tool.Soft(ErrorCodeInputUnsupported, fmt.Sprintf("%s: %s asked for input this client does not provide (only one elicitation at a time is answered)", server, name)), nil
 }

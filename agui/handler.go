@@ -230,6 +230,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		finish(func() []Event { return enc.fail(msg, code) })
 		return
 	}
+	if plan != nil && plan.again != nil {
+		// The resumed call's tool asked for more input: the run ends on a
+		// new interrupt without the model.
+		a := plan.again
+		mu.Lock()
+		enc.history = plan.raw
+		send(enc.askAgain(a.call.id, a.call.name, a.call.args, a.req))
+		mu.Unlock()
+		finish(enc.Finish)
+		log.Info("agui resume asks again", "tool", a.call.name, "tool_call_id", a.call.id)
+		return
+	}
 	if plan != nil {
 		mu.Lock()
 		enc.history = plan.raw

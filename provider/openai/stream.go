@@ -223,6 +223,13 @@ func (p *Provider) ChatStream(ctx context.Context, in agent.ChatInput, emit agen
 		}
 		toolTurn, _, pause := p.runner.HandleTools(ctx, assistantTurn, emit)
 		if pause != nil {
+			// A tool_input pause keeps the results of the step's other calls.
+			if len(toolTurn.Blocks) > 0 {
+				turns = append(turns, toolTurn)
+				p.runner.Checkpoint(ctx, in.MessageID, step+1, turns[inputLen:])
+				partial := toolTurn
+				emit(agent.StreamEvent{Type: agent.EventTurn, Turn: &partial})
+			}
 			emitUsage()
 			emit(*pause)
 			return nil

@@ -65,3 +65,62 @@ func TestRunner_HandleTools(t *testing.T) {
 		t.Fatalf("regular path wrong: pause=%v traces=%d", pause, len(traces))
 	}
 }
+
+// askingTool needs a seat number before it can book; given one it books.
+func askingTool() *tool.Tool {
+	return &tool.Tool{Name: "book_seat", Schema: tool.Obj(nil), Fn: func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if req, resp, ok := tool.InputResponseFrom(ctx); ok {
+			return map[string]any{"booked": resp.Content["seat"], "state": string(req.State)}, nil
+		}
+		return nil, tool.NeedInput(tool.InputRequest{Message: "Which seat?", Schema: json.RawMessage(`{"type":"object"}`), State: json.RawMessage(`"s1"`)})
+	}}
+}
+
+func TestRunner_ToolInputPause(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(sleepyTool("get_weather", 0))
+	reg.Register(askingTool())
+	r := Runner{Reg: reg}
+	turn := agent.Turn{Role: agent.RoleAssistant, Blocks: []agent.Block{
+		{Type: agent.BlockToolUse, ToolUseID: "w", ToolName: "get_weather", ToolInput: json.RawMessage(`{}`)},
+		{Type: agent.BlockToolUse, ToolUseID: "b", ToolName: "book_seat", ToolInput: json.RawMessage(`{"flight":"X1"}`)},
+	}}
+	var evs []agent.StreamEvent
+	tt, traces, pause := r.HandleTools(context.Background(), turn, func(ev agent.StreamEvent) { evs = append(evs, ev) })
+	if pause == nil || pause.Kind != agent.PauseKindToolInput || pause.ToolUseID != "b" || pause.Name != "book_seat" ||
+		string(pause.Input) != `{"flight":"X1"}` || pause.Message != "Which seat?" {
+		t.Fatalf("pause = %+v", pause)
+	}
+	var req tool.InputRequest
+	if err := json.Unmarshal(pause.Request, &req); err != nil || req.Mode != tool.InputModeForm || string(req.State) != `"s1"` {
+		t.Fatalf("request = %s (%v)", pause.Request, err)
+	}
+	if len(tt.Blocks) != 1 || tt.Blocks[0].ToolUseID != "w" || len(traces) != 1 {
+		t.Fatalf("the call that ran keeps its result: %+v", tt.Blocks)
+	}
+	results := 0
+	for _, ev := range evs {
+		if ev.Type == agent.EventToolResult {
+			results++
+			if ev.ToolUseID == "b" {
+				t.Errorf("the paused call has no result: %+v", ev)
+			}
+		}
+	}
+	if results != 1 {
+		t.Errorf("one tool_result for the call that ran, got %d", results)
+	}
+
+	// The second run, with the user's answer, finishes the call.
+	out, again, err := tool.ExecuteWithInput(context.Background(), tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{}),
+		tool.Call{ToolUseID: "b", Name: "book_seat", Input: pause.Input}, req, tool.InputResponse{Action: tool.InputAccept, Content: map[string]any{"seat": "12A"}})
+	if err != nil || again != nil || !strings.Contains(out, `"booked":"12A"`) || !strings.Contains(out, `"state":"\"s1\""`) {
+		t.Fatalf("resumed: out=%s again=%v err=%v", out, again, err)
+	}
+
+	// Alone in its turn, the call pauses with no tool turn at all.
+	alone := agent.Turn{Role: agent.RoleAssistant, Blocks: turn.Blocks[1:]}
+	if tt, _, pause := r.HandleTools(context.Background(), alone, nil); pause == nil || len(tt.Blocks) != 0 {
+		t.Fatalf("alone: %+v %+v", tt, pause)
+	}
+}

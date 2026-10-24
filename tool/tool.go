@@ -133,6 +133,10 @@ func (t *Tool) Call(ctx context.Context, input string) (string, error) {
 	started := time.Now()
 	slog.Debug("tool call", "name", t.Name, "input", truncate(input, 500))
 	out, err := t.Fn(ctx, raw)
+	if _, ok := AsInputRequired(err); ok {
+		slog.Debug("tool call needs the user's input", "name", t.Name)
+		return "", err
+	}
 	if err != nil {
 		slog.Warn("tool call failed", "name", t.Name, "err", err,
 			"duration_ms", time.Since(started).Milliseconds())

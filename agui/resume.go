@@ -54,6 +54,11 @@ func refuse(code, format string, args ...any) error {
 //
 //	dgi1.<base64url tool call id>.<pause kind>.<expiry in unix seconds, 0 for none>.<base64url HMAC-SHA256, 16 bytes>
 //
+// A tool_input pause also carries the tool's input request, which the
+// resumed call is run again with, signed with the rest:
+//
+//	dgi1.<call id>.tool_input.<expiry>.<base64url request JSON>.<HMAC>
+//
 // The id is opaque to clients, who echo it back in resume[].interruptId.
 type interruptCodec struct {
 	key []byte
@@ -70,6 +75,7 @@ type interruptRef struct {
 	toolCallID string
 	kind       string
 	expiry     string
+	request    []byte // tool_input only: the tool.InputRequest JSON
 	mac        []byte
 }
 
@@ -80,13 +86,25 @@ func (c *interruptCodec) mint(threadID string, p Pause) (string, time.Time) {
 		expires = c.now().Add(c.ttl).Truncate(time.Second)
 		expiry = strconv.FormatInt(expires.Unix(), 10)
 	}
-	mac := c.sign(threadID, p.ToolUseID, p.Kind, expiry, p.Name, p.Input)
-	return strings.Join([]string{interruptIDVersion, b64.EncodeToString([]byte(p.ToolUseID)), p.Kind, expiry, b64.EncodeToString(mac)}, "."), expires
+	mac := c.sign(threadID, p.ToolUseID, p.Kind, expiry, p.Name, p.Input, p.Request)
+	parts := []string{interruptIDVersion, b64.EncodeToString([]byte(p.ToolUseID)), p.Kind, expiry}
+	if p.Kind == agent.PauseKindToolInput {
+		parts = append(parts, b64.EncodeToString(p.Request))
+	}
+	return strings.Join(append(parts, b64.EncodeToString(mac)), "."), expires
 }
 
 func (c *interruptCodec) parse(id string) (interruptRef, bool) {
 	parts := strings.Split(id, ".")
-	if len(parts) != 5 || parts[0] != interruptIDVersion {
+	var request []byte
+	if len(parts) == 6 && parts[2] == agent.PauseKindToolInput {
+		r, err := b64.DecodeString(parts[4])
+		if err != nil || !json.Valid(r) {
+			return interruptRef{}, false
+		}
+		request, parts = r, append(parts[:4], parts[5])
+	}
+	if len(parts) != 5 || parts[0] != interruptIDVersion || (parts[2] == agent.PauseKindToolInput) != (request != nil) {
 		return interruptRef{}, false
 	}
 	callID, err := b64.DecodeString(parts[1])
@@ -101,15 +119,15 @@ func (c *interruptCodec) parse(id string) (interruptRef, bool) {
 		return interruptRef{}, false
 	}
 	switch parts[2] {
-	case agent.PauseKindHITL, agent.PauseKindHITLChoice, agent.PauseKindHITLForm, agent.PauseKindApproval, agent.PauseKindCustom:
+	case agent.PauseKindHITL, agent.PauseKindHITLChoice, agent.PauseKindHITLForm, agent.PauseKindApproval, agent.PauseKindCustom, agent.PauseKindToolInput:
 	default:
 		return interruptRef{}, false
 	}
-	return interruptRef{toolCallID: string(callID), kind: parts[2], expiry: parts[3], mac: mac}, true
+	return interruptRef{toolCallID: string(callID), kind: parts[2], expiry: parts[3], request: request, mac: mac}, true
 }
 
 func (c *interruptCodec) verify(threadID string, ref interruptRef, name string, args json.RawMessage) bool {
-	return hmac.Equal(c.sign(threadID, ref.toolCallID, ref.kind, ref.expiry, name, args), ref.mac)
+	return hmac.Equal(c.sign(threadID, ref.toolCallID, ref.kind, ref.expiry, name, args, ref.request), ref.mac)
 }
 
 // expired reports whether ref's expiry has passed.
@@ -118,9 +136,13 @@ func (c *interruptCodec) expired(ref interruptRef) bool {
 	return n > 0 && !c.now().Before(time.Unix(n, 0))
 }
 
-func (c *interruptCodec) sign(threadID, callID, kind, expiry, name string, args json.RawMessage) []byte {
+func (c *interruptCodec) sign(threadID, callID, kind, expiry, name string, args, request json.RawMessage) []byte {
 	m := hmac.New(sha256.New, c.key)
-	for _, part := range []string{interruptIDVersion, threadID, callID, kind, expiry, name, string(canonicalJSON(args))} {
+	parts := []string{interruptIDVersion, threadID, callID, kind, expiry, name, string(canonicalJSON(args))}
+	if kind == agent.PauseKindToolInput {
+		parts = append(parts, string(request))
+	}
+	for _, part := range parts {
 		fmt.Fprintf(m, "%d:%s;", len(part), part)
 	}
 	return m.Sum(nil)[:16]
@@ -163,6 +185,9 @@ type resumeResult struct {
 	name     string
 	args     json.RawMessage
 	executed bool // the result is a tool's real output, so it may render
+	// again is set, and msg empty, when the call ran with the user's input
+	// and the tool asked once more.
+	again *tool.InputRequest
 }
 
 // resumePlan is how a run starts when it continues from a pause: the
@@ -173,6 +198,14 @@ type resumePlan struct {
 	messages []Message
 	raw      []json.RawMessage
 	results  []resumeResult
+	// again is a call whose tool asked for more input: the run ends on a
+	// new interrupt for it, with the history unchanged.
+	again *askAgain
+}
+
+type askAgain struct {
+	call historyCall
+	req  tool.InputRequest
 }
 
 // decision is one resume entry checked against the history.
@@ -181,6 +214,7 @@ type decision struct {
 	call     historyCall
 	ref      interruptRef
 	approval approvalAnswer
+	input    tool.InputResponse // tool_input
 }
 
 // planResume applies the spec's interrupt contract to an incoming run. It
@@ -279,14 +313,27 @@ func (h *Handler) planResume(ctx context.Context, in RunAgentInput, raw []json.R
 			if !json.Valid(p) {
 				return nil, refuse(CodeResumeInvalid, "%s: the payload is not valid JSON", at)
 			}
-			a, err := checkPayload(ref.kind, p, call.args)
-			if err != nil {
-				return nil, refuse(CodeResumeInvalid, "%s: %v", at, err)
+			if ref.kind == agent.PauseKindToolInput {
+				resp, err := checkInputPayload(p, ref.request)
+				if err != nil {
+					return nil, refuse(CodeResumeInvalid, "%s: %v", at, err)
+				}
+				d.input = resp
+			} else {
+				a, err := checkPayload(ref.kind, p, call.args)
+				if err != nil {
+					return nil, refuse(CodeResumeInvalid, "%s: %v", at, err)
+				}
+				d.approval = a
 			}
-			d.approval = a
-			if ref.kind == agent.PauseKindApproval && a.Approved && h.opts.Executor == nil {
+			if ref.kind == agent.PauseKindApproval && d.approval.Approved && h.opts.Executor == nil {
 				return nil, refuse(CodeResumeInvalid, "%s: this endpoint cannot run approved tool calls (no executor is configured)", at)
 			}
+		} else {
+			d.input = tool.InputResponse{Action: tool.InputCancel}
+		}
+		if ref.kind == agent.PauseKindToolInput && h.opts.Executor == nil {
+			return nil, refuse(CodeResumeInvalid, "%s: this endpoint cannot run tool calls again with the user's input (no executor is configured)", at)
 		}
 		todo = append(todo, d)
 	}
@@ -299,7 +346,13 @@ func (h *Handler) planResume(ctx context.Context, in RunAgentInput, raw []json.R
 
 	answers := map[string]resumeResult{}
 	for _, d := range todo {
-		answers[d.call.id] = h.resolve(ctx, in.ThreadID, d)
+		r := h.resolve(ctx, in.ThreadID, d)
+		if r.again != nil {
+			// The tool asked once more: nothing is answered yet, and the
+			// run ends on a new interrupt for the same call.
+			return &resumePlan{messages: in.Messages, raw: raw, again: &askAgain{call: d.call, req: *r.again}}, nil
+		}
+		answers[d.call.id] = r
 	}
 	return h.complete(in, raw, last, pending, answers), nil
 }
@@ -312,6 +365,25 @@ func (h *Handler) planResume(ctx context.Context, in RunAgentInput, raw []json.R
 func (h *Handler) resolve(ctx context.Context, threadID string, d decision) resumeResult {
 	r := resumeResult{name: d.call.name, args: d.call.args}
 	switch {
+	case d.ref.kind == agent.PauseKindToolInput:
+		// The call runs again with the user's answer, a cancel included, so
+		// the tool learns what the user did; like an approved call it runs
+		// to completion and its outcome is cached under the interrupt id.
+		var req tool.InputRequest
+		_ = json.Unmarshal(d.ref.request, &req)
+		out := h.approved.do(threadID+"\x00"+d.entry.InterruptID, func() string {
+			execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.opts.RunTimeout)
+			defer cancel()
+			h.opts.Logger.Info("agui resume runs a tool with the user's input", "tool", d.call.name, "tool_call_id", d.call.id, "action", d.input.Action)
+			return h.executeWithInput(execCtx, tool.Call{ToolUseID: d.call.id, Name: d.call.name, Input: callArgs(d.call.args)}, req, d.input)
+		})
+		if again, ok := strings.CutPrefix(out, askedAgain); ok {
+			r.again = &tool.InputRequest{}
+			_ = json.Unmarshal([]byte(again), r.again)
+			return r
+		}
+		r.executed = true
+		r.msg.Content = clientView(out)
 	case d.entry.Status == ResumeCancelled:
 		r.msg.Content = agent.DismissedResultJSON(d.ref.kind, "")
 	case d.ref.kind == agent.PauseKindApproval && !d.approval.Approved:
@@ -341,6 +413,38 @@ func (h *Handler) resolve(ctx context.Context, threadID string, d decision) resu
 		r.msg.Content = buf.String()
 	}
 	return r
+}
+
+// askedAgain prefixes, in the result cache, the request of a tool that
+// asked for more input instead of answering; no tool output starts with a
+// NUL byte.
+const askedAgain = "\x00asked-again:"
+
+// executeWithInput runs a paused call again with the user's answer, as
+// execute does, and encodes a further request with askedAgain.
+func (h *Handler) executeWithInput(ctx context.Context, call tool.Call, req tool.InputRequest, resp tool.InputResponse) (out string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			h.opts.Logger.Error("agui executor panic", "panic", rec, "tool", call.Name)
+			out = softJSON(tool.ErrorCodeHardFailure, fmt.Sprintf("the tool failed: %v", rec))
+		}
+	}()
+	out, again, err := tool.ExecuteWithInput(ctx, h.opts.Executor, call, req, resp)
+	switch {
+	case again != nil:
+		b, _ := json.Marshal(again)
+		return askedAgain + string(b)
+	case err != nil:
+		return softJSON(tool.ErrorCodeHardFailure, err.Error())
+	}
+	return out
+}
+
+func callArgs(args json.RawMessage) json.RawMessage {
+	if a := bytes.TrimSpace(args); len(a) > 0 {
+		return a
+	}
+	return json.RawMessage("{}")
 }
 
 // execute runs an approved call. A failing or panicking executor becomes a

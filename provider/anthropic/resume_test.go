@@ -112,3 +112,48 @@ func TestReplay_ApprovalInAParallelTurnResumes(t *testing.T) {
 		t.Errorf("the approved call's observation: %v", c)
 	}
 }
+
+// A tool that asks for input mid-turn: the call beside it has already run,
+// and its result is kept, so after the answer get_weather is answered with
+// its real observation rather than NOT_RUN.
+func TestReplay_ToolInputKeepsTheOtherCallsResult(t *testing.T) {
+	const ask = "lisbon weather and flights to madrid"
+	ctx := context.Background()
+	srv := replay.New(t, replay.File("testdata/parallel_tools.sse"), replay.File("testdata/parallel_tools_final.sse"))
+	reg := replay.AskingRegistry(t)
+	p := New(Options{APIKey: "test-key", Model: "claude-sonnet-4-6", BaseURL: srv.URL, Registry: reg, Config: replay.Config()})
+
+	var first replay.Events
+	if err := p.ChatStream(ctx, replayInput(ask), first.Emit); err != nil {
+		t.Fatal(err)
+	}
+	if first.Pause == nil || first.Pause.Kind != agent.PauseKindToolInput || first.Pause.Name != "search_flights" || len(first.ToolResults) != 1 || len(first.Turns) != 2 {
+		t.Fatalf("the turn pauses on the question and keeps the weather: %s %+v", first.Order(), first.Pause)
+	}
+	var req tool.InputRequest
+	_ = json.Unmarshal(first.Pause.Request, &req)
+	out, again, err := tool.ExecuteWithInput(ctx, tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{}),
+		tool.Call{ToolUseID: first.Pause.ToolUseID, Name: "search_flights", Input: first.Pause.Input}, req,
+		tool.InputResponse{Action: tool.InputAccept, Content: map[string]any{"cabin": "economy"}})
+	if err != nil || again != nil {
+		t.Fatalf("the answer finishes the call: %v %v", again, err)
+	}
+	history := append([]agent.Turn{agent.UserTurn(ask)}, first.Turns...)
+	resumed, err := agent.AnswerPause(history, first.Pause.ToolUseID, json.RawMessage(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second replay.Events
+	if err := p.ChatStream(ctx, agent.ChatInput{MemoryContext: replay.Memory, Turns: resumed}, second.Emit); err != nil {
+		t.Fatal(err)
+	}
+	if !second.Done || second.Text != replyBoth {
+		t.Fatalf("the resumed turn completes: %s %q", second.Order(), second.Text)
+	}
+	if c := toolResultOnWire(t, srv, 1, 0); replay.Get(c, "high_c") != float64(27) {
+		t.Errorf("get_weather keeps its real result: %v", c)
+	}
+	if c := toolResultOnWire(t, srv, 1, 1); replay.Get(c, "cheapest_eur") != float64(89) {
+		t.Errorf("the answered call's observation: %v", c)
+	}
+}

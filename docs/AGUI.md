@@ -173,6 +173,19 @@ A pause ends the run with an AG-UI interrupt. The encoder emits, in order:
 | `request_user_form` | `input_required` | the title | `{"answers": {question id: answer}}`: a string for `text`, `{"value"}` for `single_choice`, `{"values"}` for `multi_choice`, with `other_text` where allowed. The payload is the result. |
 | approval | `tool_call` | the interceptor's reason | `{"approved": boolean, "reason"?: string}`. Approving runs the call and its output is the result; declining gives `agent.DeniedResultJSON`. |
 | custom pause tool | `dialogram:<tool>` | | none. The payload, any JSON, is the result. |
+| a tool's input request (`tool_input`) | `input_required` | the tool's message | `{"action": "accept" \| "decline" \| "cancel", "content"?: {…}}`, `content` described by the tool's requested schema (absent for a URL step). The call runs again with the answer; its output is the result, or the run ends on a new interrupt when the tool asks again. A `cancelled` resume runs it with `cancel`. |
+
+A `tool_input` interrupt's id also carries the tool's request, signed with
+the rest, because the handler keeps no state and the tool needs the
+request's state on the second run. Its metadata holds the request without
+the state, for clients that render the form or the link themselves. A
+resume is checked against that request: the action, the required fields,
+each field's type and enum. The second run needs `Options.Executor`, and
+its outcome is cached under the interrupt id like an approved call's, so a
+replayed resume does not run the tool twice. When the tool asks once more,
+the resumed run sends no model request: it ends at once on a new
+interrupt for the same call, with a snapshot equal to the history the
+client sent.
 
 These are the result bodies `examples/chatserver` builds in `/chat/respond`,
 so the model reads the same thing whichever transport the user is on.

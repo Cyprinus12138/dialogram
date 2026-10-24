@@ -23,6 +23,8 @@ type Accumulator struct {
 	PausedToolName  string
 	PausedToolInput json.RawMessage
 	PausedPrompt    string
+	// PausedRequest is the tool.InputRequest of a tool_input pause.
+	PausedRequest json.RawMessage
 	// Usage counters track the LAST seen usage event. Providers emit usage
 	// cumulatively per turn, so the last value is the per-turn total.
 	InputTokens         int
@@ -60,5 +62,6 @@ func (a *Accumulator) Observe(ev StreamEvent) {
 		a.PausedToolName = ev.Name
 		a.PausedToolInput = ev.Input
 		a.PausedPrompt = ev.Message
+		a.PausedRequest = ev.Request
 	}
 }

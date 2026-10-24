@@ -107,6 +107,21 @@ function renderPause(ev) {
   } else if (kind === "approval") {
     box.appendChild($("p", null, ev.message || `${ev.name} needs your approval`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2)));
     const row = $("div", "chips"); const yes = $("button", null, "Approve"); yes.type = "button"; yes.onclick = () => submit({ approved: true }); const no = $("button", "ghost", "Deny"); no.type = "button"; no.onclick = () => submit({ approved: false }); row.append(yes, no); box.appendChild(row);
+  } else if (kind === "tool_input") {
+    const req = typeof ev.request === "string" ? JSON.parse(ev.request) : (ev.request || {});
+    box.appendChild($("p", null, `${ev.name} asks: ${req.message || ev.message || ""}`)); const fields = {};
+    if (req.mode === "url") { const a = $("a", null, req.url); a.href = req.url; a.target = "_blank"; a.rel = "noopener"; box.appendChild(a); }
+    else for (const [name, p] of Object.entries((req.requested_schema || {}).properties || {})) {
+      box.appendChild($("div", "s", p.title || p.description || name)); let el;
+      if (p.enum) { el = $("select"); for (const v of p.enum) { const o = $("option", null, v); o.value = v; el.appendChild(o); } fields[name] = () => el.value; }
+      else if (p.type === "boolean") { el = $("input"); el.type = "checkbox"; fields[name] = () => el.checked; }
+      else { el = $("input"); if (p.type === "number" || p.type === "integer") el.type = "number"; fields[name] = () => el.value === "" ? undefined : (p.type === "number" || p.type === "integer" ? Number(el.value) : el.value); }
+      box.appendChild(el); }
+    const row = $("div", "chips"); const ok = $("button", null, req.mode === "url" ? "Done" : "Submit"); ok.type = "button";
+    ok.onclick = () => { const content = {}; for (const k in fields) { const v = fields[k](); if (v !== undefined) content[k] = v; } submit(req.mode === "url" ? { action: "accept" } : { action: "accept", content }); };
+    const no = $("button", "ghost", "Decline"); no.type = "button"; no.onclick = () => submit({ action: "decline" });
+    const skip = $("button", "ghost", "Cancel"); skip.type = "button"; skip.onclick = () => submit({ action: "cancel" });
+    row.append(ok, no, skip); box.appendChild(row);
   } else if (kind === "custom") {
     if (ev.message) box.appendChild($("p", null, ev.message)); else { box.appendChild($("p", null, `${ev.name} proposed:`)); box.appendChild($("pre", "s", JSON.stringify(input, null, 2))); }
     const row = $("div", "chips"); for (const v of ["accept", "skip"]) { const b = $("button", v === "skip" ? "ghost" : null, v); b.type = "button"; b.onclick = () => submit({ selected: [v] }); row.appendChild(b); } box.appendChild(row);
@@ -128,7 +143,7 @@ async function hydrate() {
     else if (b.type === "tool_use") renderGenUI(b.tool_input);
     else if (b.type === "tool_result" && b.tool_result && b.tool_result.ui_payload) renderGenUI(b.tool_result.ui_payload.data);
   }
-  if (c.pending) renderPause({ kind: c.pending.kind, tool_use_id: c.pending.tool_use_id, name: c.pending.tool_name, input: c.pending.tool_input, message: c.pending.prompt });
+  if (c.pending) renderPause({ kind: c.pending.kind, tool_use_id: c.pending.tool_use_id, name: c.pending.tool_name, input: c.pending.tool_input, message: c.pending.prompt, request: c.pending.request });
 }
 
 // ---- streaming -----------------------------------------------------------
@@ -179,7 +194,8 @@ function start(messageId, since, firstBody) { current = { messageId, since, abor
 async function respond(toolUseId, payload) {
   const res = await fetch("/chat/respond", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversation_id: conversationId, tool_use_id: toolUseId, message_id: crypto.randomUUID(), ...payload }) });
   if (!res.ok) { add($("div", "err", `respond failed: ${res.status}`)); return; }
-  const { message_id } = await res.json(); start(message_id, 0, null); // pure tail of the continuation producer
+  const body = await res.json(); if (body.waiting) { renderPause(body.waiting); return; } // the tool asked again
+  start(body.message_id, 0, null); // pure tail of the continuation producer
 }
 
 document.getElementById("compose").onsubmit = e => { e.preventDefault(); if (current) return; const t = document.getElementById("text"); const msg = t.value.trim(); if (!msg) return; t.value = "";

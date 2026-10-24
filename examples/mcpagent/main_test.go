@@ -47,11 +47,29 @@ func notesServer(t *testing.T, erased *atomic.Int32) string {
 			erased.Add(1)
 			return nil, noteOut{ID: in.ID, Erased: true}, nil
 		})
+	// rename asks the user for the new title before it renames.
+	no := false
+	sdk.AddTool(srv, &sdk.Tool{Name: "rename", Description: "Renames a note.",
+		Annotations: &sdk.ToolAnnotations{DestructiveHint: &no, OpenWorldHint: &closed}},
+		func(_ context.Context, req *sdk.CallToolRequest, in noteIn) (*sdk.CallToolResult, noteOut, error) {
+			if req.Params.RequestState == "" {
+				return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"t": &sdk.ElicitParams{Message: "New title for " + in.ID + "?",
+					RequestedSchema: map[string]any{"type": "object", "required": []any{"title"}, "properties": map[string]any{
+						"title": map[string]any{"type": "string"}, "pinned": map[string]any{"type": "boolean"}}}}}, RequestState: "renaming"}, noteOut{}, nil
+			}
+			r := req.Params.InputResponses["t"].(*sdk.ElicitResult)
+			if r.Action != "accept" {
+				return nil, noteOut{ID: in.ID, Text: "kept the old title"}, nil
+			}
+			return nil, noteOut{ID: in.ID, Text: fmt.Sprintf("renamed to %v, pinned %v", r.Content["title"], r.Content["pinned"])}, nil
+		})
 	sdk.AddTool(srv, &sdk.Tool{Name: "ping", Description: "Pings the note service."},
 		func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, noteOut, error) {
 			return nil, noteOut{Text: "pong"}, nil
 		})
-	hs := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	// Stateless, as sg-property-engine serves it: the session speaks
+	// 2026-07-28, where elicitation is a round trip the client retries.
+	hs := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, &sdk.StreamableHTTPOptions{Stateless: true}))
 	t.Cleanup(hs.Close)
 	return hs.URL
 }
@@ -241,5 +259,28 @@ func TestApproveNamesMustBeRegistered(t *testing.T) {
 		c, options{approve: []string{"lookup"}}, strings.NewReader(""), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), `"lookup"`) || !strings.Contains(err.Error(), "notes__lookup") {
 		t.Errorf("an unprefixed -approve name should be refused with the registered names: %v", err)
+	}
+}
+
+func TestElicitationIsAskedOnTheTerminal(t *testing.T) {
+	var erased atomic.Int32
+	for _, c := range []struct{ stdin, want string }{
+		// Fields come in the order the server wrote them: pinned, then title.
+		{"y\nn\nShopping list\n", "renamed to Shopping list, pinned false"},
+		{"n\n", "kept the old title"},
+	} {
+		s, u, out := newTestSession(t, notesServer(t, &erased), options{}, c.stdin,
+			call("r", "notes__rename", `{"id":"n1"}`),
+			say("Done."),
+		)
+		if err := s.ask(context.Background(), "Rename n1."); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "? notes__rename asks: New title for n1?") {
+			t.Errorf("the server's question is asked:\n%s", out)
+		}
+		if got := u.result(t, 1, "notes__rename"); !strings.Contains(got, c.want) {
+			t.Errorf("stdin %q: the model reads %s", c.stdin, got)
+		}
 	}
 }

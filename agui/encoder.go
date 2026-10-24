@@ -138,6 +138,8 @@ type Pause struct {
 	Message   string               `json:"message,omitempty"`
 	Options   []agent.ChoiceOption `json:"options,omitempty"`
 	Multiple  bool                 `json:"multiple,omitempty"`
+	// Request is the tool.InputRequest of a tool_input pause.
+	Request json.RawMessage `json:"request,omitempty"`
 }
 
 // Meta is the value of a CUSTOM "meta" event: a meta event that arrived
@@ -210,7 +212,7 @@ func (e *Encoder) Push(ev agent.StreamEvent) []Event {
 	case agent.EventWaitingForUser:
 		out = append(out, e.closeMessage()...)
 		p := Pause{Kind: ev.Kind, ToolUseID: ev.ToolUseID, Name: pauseToolName(ev), Input: pauseInput(ev),
-			Message: ev.Message, Options: ev.Options, Multiple: ev.Multiple}
+			Message: ev.Message, Options: ev.Options, Multiple: ev.Multiple, Request: ev.Request}
 		if p.ToolUseID == "" {
 			// Nothing to bind a resume to: report the pause the CUSTOM way
 			// only.
@@ -292,12 +294,34 @@ func (e *Encoder) interrupt(p Pause) Interrupt {
 		Message:        interruptMessage(p),
 		ToolCallID:     p.ToolUseID,
 		ResponseSchema: responseSchema(p),
-		Metadata:       mustJSON(map[string]InterruptMetadata{MetadataKey: {Kind: p.Kind, Tool: p.Name, Input: p.Input}}),
+		Metadata:       mustJSON(map[string]InterruptMetadata{MetadataKey: {Kind: p.Kind, Tool: p.Name, Input: p.Input, Request: clientRequest(p.Request)}}),
 	}
 	if !expires.IsZero() {
 		in.ExpiresAt = expires.UTC().Format(time.RFC3339)
 	}
 	return in
+}
+
+// askAgain ends a resumed run on a new interrupt for a call that was
+// announced in an earlier run and whose tool asked for more input.
+func (e *Encoder) askAgain(callID, name string, args json.RawMessage, req tool.InputRequest) []Event {
+	e.calls[callID] = true
+	return e.Push(agent.StreamEvent{Type: agent.EventWaitingForUser, Kind: agent.PauseKindToolInput, ToolUseID: callID, Name: name,
+		Input: args, Message: req.Message, Request: mustJSON(req)})
+}
+
+// clientRequest is an input request as a client renders it, without the
+// state only the tool reads (the interrupt id carries that).
+func clientRequest(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var req tool.InputRequest
+	if json.Unmarshal(raw, &req) != nil {
+		return nil
+	}
+	req.State = nil
+	return mustJSON(req)
 }
 
 // snapshot is the MESSAGES_SNAPSHOT an interrupt requires: the history as

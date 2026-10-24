@@ -3,6 +3,7 @@ package agui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -85,6 +86,9 @@ type InterruptMetadata struct {
 	Kind  string          `json:"kind"`
 	Tool  string          `json:"tool"`
 	Input json.RawMessage `json:"input,omitempty"`
+	// Request is the tool's input request of a tool_input pause: mode,
+	// message, and the requested schema or the URL.
+	Request json.RawMessage `json:"request,omitempty"`
 }
 
 // interruptReason maps a pause kind to an interrupt reason.
@@ -92,7 +96,7 @@ func interruptReason(p Pause) string {
 	switch p.Kind {
 	case agent.PauseKindApproval:
 		return ReasonToolCall
-	case agent.PauseKindHITL, agent.PauseKindHITLChoice, agent.PauseKindHITLForm:
+	case agent.PauseKindHITL, agent.PauseKindHITLChoice, agent.PauseKindHITLForm, agent.PauseKindToolInput:
 		return ReasonInputRequired
 	}
 	return CustomReasonPrefix + p.Name
@@ -219,6 +223,17 @@ func responseSchema(p Pause) json.RawMessage {
 		}
 		answers := map[string]any{"type": "object", "title": in.Title, "properties": props, "required": required, "additionalProperties": false}
 		s = map[string]any{"type": "object", "properties": map[string]any{"answers": answers}, "required": []string{"answers"}, "additionalProperties": false}
+	case agent.PauseKindToolInput:
+		var req tool.InputRequest
+		decodeInput(p.Request, &req)
+		props := map[string]any{"action": map[string]any{"type": "string", "enum": []string{tool.InputAccept, tool.InputDecline, tool.InputCancel},
+			"description": "accept to answer, decline to say no, cancel to dismiss"}}
+		if req.Mode != tool.InputModeURL {
+			content := map[string]any{"type": "object"}
+			decodeInput(req.Schema, &content)
+			props["content"] = content
+		}
+		s = map[string]any{"type": "object", "properties": props, "required": []string{"action"}, "additionalProperties": false}
 	default:
 		return nil
 	}
@@ -458,4 +473,70 @@ func contains(ss []string, s string) bool {
 // softJSON renders a soft-failure tool result.
 func softJSON(code, msg string) string {
 	return string(mustJSON(tool.Soft(code, msg)))
+}
+
+// checkInputPayload checks a tool_input resume against the request the
+// interrupt carries: an action, and for an accepted form the fields the
+// requested schema declares, of their types, the required ones present.
+func checkInputPayload(payload, request json.RawMessage) (tool.InputResponse, error) {
+	fields, err := objectFields(payload, "action", "content")
+	if err != nil {
+		return tool.InputResponse{}, err
+	}
+	var resp tool.InputResponse
+	if err := field(fields, "action", true, &resp.Action); err != nil {
+		return resp, err
+	}
+	if !contains([]string{tool.InputAccept, tool.InputDecline, tool.InputCancel}, resp.Action) {
+		return resp, fmt.Errorf("action must be one of %s", strings.Join(quoted([]string{tool.InputAccept, tool.InputDecline, tool.InputCancel}), ", "))
+	}
+	if err := field(fields, "content", false, &resp.Content); err != nil {
+		return resp, err
+	}
+	var req tool.InputRequest
+	_ = json.Unmarshal(request, &req)
+	if resp.Action != tool.InputAccept || req.Mode == tool.InputModeURL {
+		if len(resp.Content) > 0 {
+			return resp, errors.New("content is only sent with an accepted form")
+		}
+		return resp, nil
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string   `json:"type"`
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	_ = json.Unmarshal(req.Schema, &schema)
+	for _, name := range schema.Required {
+		if _, ok := resp.Content[name]; !ok {
+			return resp, fmt.Errorf("content.%s is required", name)
+		}
+	}
+	for name, v := range resp.Content {
+		p, ok := schema.Properties[name]
+		if !ok {
+			return resp, fmt.Errorf("content.%s is not a field of the request", name)
+		}
+		var good bool
+		switch p.Type {
+		case "string":
+			s, isStr := v.(string)
+			good = isStr && (len(p.Enum) == 0 || contains(p.Enum, s))
+		case "number":
+			_, good = v.(float64)
+		case "integer":
+			f, isNum := v.(float64)
+			good = isNum && f == float64(int64(f))
+		case "boolean":
+			_, good = v.(bool)
+		default:
+			good = true
+		}
+		if !good {
+			return resp, fmt.Errorf("content.%s does not match the requested schema", name)
+		}
+	}
+	return resp, nil
 }

@@ -287,3 +287,25 @@ func Registry(t testing.TB, weather any) *tool.Registry {
 	tool.RegisterHITL(reg)
 	return reg
 }
+
+// AskingRegistry is Registry with a search_flights that asks the user for a
+// cabin before it searches (tool.NeedInput), and answers with the fixture's
+// observation once it has one.
+func AskingRegistry(t testing.TB) *tool.Registry {
+	t.Helper()
+	base := Registry(t, nil)
+	reg := tool.NewRegistry()
+	weather, _ := base.Lookup("get_weather")
+	reg.Register(weather)
+	flights, _ := base.Lookup("search_flights")
+	asking := *flights
+	asking.Fn = func(ctx context.Context, input json.RawMessage) (any, error) {
+		if _, resp, ok := tool.InputResponseFrom(ctx); ok && resp.Content["cabin"] != nil {
+			return flights.Fn(ctx, input)
+		}
+		return nil, tool.NeedInput(tool.InputRequest{Message: "Which cabin?", State: json.RawMessage(`"cabin"`),
+			Schema: json.RawMessage(`{"type":"object","properties":{"cabin":{"type":"string"}},"required":["cabin"]}`)})
+	}
+	reg.Register(&asking)
+	return reg
+}

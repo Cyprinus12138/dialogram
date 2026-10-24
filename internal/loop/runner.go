@@ -59,7 +59,9 @@ func HasToolUse(t agent.Turn) bool {
 // When emit is non-nil (streaming), tool_call events fire for every regular
 // tool up front in model order, then one tool_result per result. A non-nil
 // pause means the provider must stop the loop after emitting usage and the
-// pause event (streaming) or return the text so far (non-streaming). On
+// pause event (streaming) or return the text so far (non-streaming). A
+// tool_input pause can come with a non-empty toolTurn: the step's other
+// calls ran, and their results are kept before the loop stops. On
 // both paths a pause is recorded as a waiting_for_user event on the span
 // in ctx.
 func (r Runner) HandleTools(ctx context.Context, assistantTurn agent.Turn, emit agent.EmitFn) (toolTurn agent.Turn, traces []agent.ToolTrace, pause *agent.StreamEvent) {
@@ -100,12 +102,13 @@ func (r Runner) handleTools(ctx context.Context, assistantTurn agent.Turn, emit 
 			ev := ApprovalPauseEvent(pb, reason)
 			return agent.Turn{}, nil, &ev
 		}
+		results, input := InputPause(results)
 		if emit != nil {
 			EmitToolResults(emit, results)
 		}
 		tt := ToolTurn(results)
 		tt.Blocks = DeferredPauseResultBlocks(tt.Blocks, pauseBlocks)
-		return tt, Traces(results), nil
+		return tt, Traces(results), input
 	}
 	if p, ok := agent.DetectPause(assistantTurn, isPause); ok {
 		ev := p.Event()
@@ -119,10 +122,14 @@ func (r Runner) handleTools(ctx context.Context, assistantTurn agent.Turn, emit 
 		ev := ApprovalPauseEvent(pb, reason)
 		return agent.Turn{}, nil, &ev
 	}
+	results, input := InputPause(results)
 	if emit != nil {
 		EmitToolResults(emit, results)
 	}
-	return ToolTurn(results), Traces(results), nil
+	if input != nil && len(results) == 0 {
+		return agent.Turn{}, nil, input
+	}
+	return ToolTurn(results), Traces(results), input
 }
 
 // Checkpoint hands the turns this run has produced so far to the
