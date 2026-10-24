@@ -124,8 +124,8 @@ data: {"type":"done"}
 - `id:` is monotonic per `message_id`.
 - `: ping` comments keep connections open through proxies and carry no id.
 - Terminal events: `done`, `error`, or `waiting_for_user` (a human-in-the-loop
-  pause; the application resumes it later and starts a new producer, see
-  `Handler.Launch`). The buffer's terminal status is set at the same time,
+  pause; the application answers it with `agent.AnswerPause` and starts a
+  new producer, see `Handler.Launch` and [BLOCK_IR.md](BLOCK_IR.md#resuming)). The buffer's terminal status is set at the same time,
   so any tailing request returns after forwarding the terminal event.
 
 ## Store contract

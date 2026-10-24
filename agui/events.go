@@ -48,7 +48,7 @@ const ContentType = "text/event-stream"
 // do not apply are omitted from the JSON.
 //
 //	RUN_STARTED            ThreadID, RunID
-//	RUN_FINISHED           ThreadID, RunID, Result (optional)
+//	RUN_FINISHED           ThreadID, RunID, Result (optional), Outcome (optional)
 //	RUN_ERROR              Message, Code (optional)
 //	STEP_STARTED/FINISHED  StepName
 //	TEXT_MESSAGE_START     MessageID, Role ("assistant")
@@ -74,9 +74,11 @@ type Event struct {
 	ThreadID string          `json:"threadId,omitempty"`
 	RunID    string          `json:"runId,omitempty"`
 	Result   json.RawMessage `json:"result,omitempty"`
-	Message  string          `json:"message,omitempty"`
-	Code     string          `json:"code,omitempty"`
-	StepName string          `json:"stepName,omitempty"`
+	// Outcome says why a RUN_FINISHED run ended; nil means success.
+	Outcome  *Outcome `json:"outcome,omitempty"`
+	Message  string   `json:"message,omitempty"`
+	Code     string   `json:"code,omitempty"`
+	StepName string   `json:"stepName,omitempty"`
 
 	MessageID       string `json:"messageId,omitempty"`
 	Role            string `json:"role,omitempty"`
@@ -98,6 +100,11 @@ type Event struct {
 
 	Name  string          `json:"name,omitempty"`
 	Value json.RawMessage `json:"value,omitempty"`
+
+	// snapshot, when set, is what a MESSAGES_SNAPSHOT carries instead of
+	// Messages: the client's own messages as it sent them, so a snapshot
+	// never rewrites content Message cannot represent.
+	snapshot []json.RawMessage
 }
 
 // MarshalJSON emits the event with the spec's required-but-possibly-empty
@@ -124,6 +131,12 @@ func (e Event) MarshalJSON() ([]byte, error) {
 			Delta json.RawMessage `json:"delta"`
 		}{plain(e), d})
 	case EventMessagesSnapshot:
+		if e.snapshot != nil {
+			return json.Marshal(struct {
+				plain
+				Messages []json.RawMessage `json:"messages"`
+			}{plain(e), e.snapshot})
+		}
 		msgs := e.Messages
 		if msgs == nil {
 			msgs = []Message{}

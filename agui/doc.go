@@ -22,7 +22,8 @@
 //	tool_result      → TOOL_CALL_RESULT (+ CUSTOM "gen_ui" for ui_payload)
 //	gen_ui           → CUSTOM "gen_ui"
 //	usage            → CUSTOM "usage"
-//	waiting_for_user → CUSTOM "waiting_for_user" + RUN_FINISHED
+//	waiting_for_user → CUSTOM "waiting_for_user" + MESSAGES_SNAPSHOT +
+//	                   RUN_FINISHED{outcome: interrupt}
 //	done             → RUN_FINISHED
 //	error            → RUN_ERROR
 //	turn             → dropped (internal boundary event)
@@ -36,13 +37,25 @@
 // you need an AG-UI compatible frontend such as CopilotKit. Both sit on
 // the same agent.Agent.ChatStream.
 //
-// # Pauses
+// # Interrupts
 //
-// A human-in-the-loop pause (waiting_for_user) ends the run in AG-UI terms.
-// The Encoder emits the pause's tool call so the client's history carries
-// it, then CUSTOM "waiting_for_user" and RUN_FINISHED. The client resumes by
-// appending a tool message with that toolCallId and the user's answer, then
-// starting a new run.
+// A human-in-the-loop pause (waiting_for_user) ends the run with an AG-UI
+// interrupt. The Encoder emits the pause's tool call so the client's
+// history carries it, then CUSTOM "waiting_for_user" for clients that
+// render dialogram's pauses themselves, then the MESSAGES_SNAPSHOT the spec
+// requires, then RUN_FINISHED whose outcome holds one Interrupt: a reason
+// per pause kind, the paused toolCallId, and a responseSchema for the
+// answer.
+//
+// The client resumes with a new run whose RunAgentInput.resume answers the
+// interrupt. The Handler checks every entry before acting, runs an approved
+// call through Options.Executor, answers the paused call with
+// TOOL_CALL_RESULT (without starting it again), answers the turn's other
+// calls as not run, and only then calls the Runner. Interrupt ids are
+// signed with Options.InterruptKey, so the client's history, which the
+// handler otherwise trusts, cannot be edited into running a call the agent
+// never paused on. A client that answers with its own tool message, the
+// way that predates interrupts, still works.
 //
 // # Spec pages this package was written against
 //
@@ -60,6 +73,9 @@
 //     — the SSE framing is "data: <json>\n\n" with content type
 //     text/event-stream; no event: or id: lines.
 //   - sdks/typescript/packages/client/src/apply/default.ts (same repo) —
-//     how the reference client folds TOOL_CALL_START.parentMessageId and
-//     TOOL_CALL_RESULT into its message list.
+//     how the reference client folds TOOL_CALL_START.parentMessageId,
+//     TOOL_CALL_RESULT and MESSAGES_SNAPSHOT into its message list.
+//   - https://docs.ag-ui.com/concepts/interrupts and spec/1.0/schema.json
+//     (same repo) — the interrupt outcome, Interrupt, ResumeEntry and the
+//     resume contract rules.
 package agui

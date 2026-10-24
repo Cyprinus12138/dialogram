@@ -27,12 +27,15 @@ the project lacks it, and these projects change quickly.
 - Tool annotations (MCP-style hints), `PolicyInterceptor` and
   `ApprovalListInterceptor`.
 - Pause tools for input, choice and forms, plus custom pause tools. A pause
-  ends the turn; the application resumes it by appending a `tool_result`.
+  ends the turn; the application resumes it with `agent.AnswerPause`, which
+  answers every call of the paused turn.
 - Step checkpoints (`Checkpointer`) and `CloseDangling` for crash recovery.
 - A resumable SSE transport over a memory or Redis buffer, with cursor
   resume, cancel and an idle watchdog. An AG-UI transport next to it.
 - Prompt-cache breakpoints with a stable/volatile prompt split.
-- `SKILL.md` skills loaded on demand.
+- Agent Skills (`SKILL.md`) in the specification's three tiers: a catalog in
+  the stable prompt, then instructions and bundled files through
+  `load_skill`, with a strict validator for CI.
 - An honesty guard and the paired A/B harness that measured it.
 - An `eval` package: deterministic loop evals, a grounding checker,
   LLM-as-judge scenarios, manifest pins and budgets.
@@ -267,13 +270,15 @@ The encoder maps dialogram's events onto `RUN_*`, `TEXT_MESSAGE_*`,
 `MessagesToTurns` lifts the client-held history into the block IR. AG-UI
 defines no event cursor. Its events page points to `MESSAGES_SNAPSHOT` for
 resynchronising after an interrupted connection, so an `agui` run cannot
-resume and `sse` stays the resumable transport. There are gaps against the
-current spec. dialogram ends a pause with `CUSTOM "waiting_for_user"` and a
-plain `RUN_FINISHED`, but AG-UI now documents an `outcome` of type
-`interrupt` on `RUN_FINISHED` and a `resume` array on `RunAgentInput`. The
-concepts page and the draft page give different shapes for `resume`.
-dialogram emits no `STATE_*`, `STEP_*`, `REASONING_*`, `ACTIVITY_*` or
-`SUBAGENT_*` events and has no protobuf encoding. AG-UI lists first-party
+resume and `sse` stays the resumable transport. A pause ends the run the
+way AG-UI's interrupts specify (checked against `spec/1.0/schema.json` on
+2026-10-24): a `MESSAGES_SNAPSHOT`, then `RUN_FINISHED` with an `outcome` of
+type `interrupt`, and the next run's `resume` entries answer it. The
+handler signs interrupt ids, so a client-held history cannot be edited into
+running a tool the agent never paused on, and it refuses resumes that break
+the spec's contract with `RUN_ERROR`. Approving with edited arguments is
+not offered. dialogram emits no `STATE_*`, `STEP_*`, `REASONING_*`,
+`ACTIVITY_*` or `SUBAGENT_*` events and has no protobuf encoding. AG-UI lists first-party
 integrations including Pydantic AI, Google ADK (Python and JavaScript),
 Mastra and LlamaIndex, a community integration for the Claude Agent SDK, and
 the OpenAI Agent SDK as in progress.
@@ -311,18 +316,24 @@ Not implemented.
 
 ### Agent Skills (`SKILL.md`)
 
-dialogram loads `SKILL.md` bundles with progressive disclosure (see
-[SKILLS.md](SKILLS.md)): one-line summaries in the stable prompt, the body
-through `load_skill`. Its frontmatter does not follow the Agent Skills
-specification. dialogram requires `id`, `name` and `description` and reads
-`version` and a comma-separated `tool_allowlist`. The specification requires
-`name` (lowercase letters, digits and hyphens, matching the directory name)
-and `description`, and defines optional `license`, `compatibility`,
-`metadata` and a space-separated, experimental `allowed-tools`. dialogram
-ignores unknown keys, so those optional fields pass through. But a
-spec-conformant `SKILL.md` has no `id`, so dialogram rejects it today.
-dialogram also does not serve the `scripts/`, `references/` or `assets/`
-files the specification describes. The Claude Agent SDK loads skills from
+dialogram reads Agent Skills packages (see [SKILLS.md](SKILLS.md)). The
+specification requires `name` (lowercase letters, digits and hyphens,
+matching the directory name) and `description`, and defines optional
+`license`, `compatibility`, `metadata` and a space-separated, experimental
+`allowed-tools`. dialogram reads all six. It follows the three tiers of the
+specification's client guide: names and descriptions in the stable prompt
+as an `<available_skills>` block, the instructions through `load_skill`, and
+bundled files through the same tool with a path, since the model has no file
+system of its own. Loading is lenient where the guide recommends it (a name
+that breaks the rules, an unknown field, an unquoted colon) and fails on a
+skill that cannot load. `agent.ValidateSkills` applies the reference
+validator's strict checks. Long instructions and files are paged rather than
+cut. Loading the 19 skills in github.com/anthropics/skills (2026-10-24), all
+load and every bundled text file reads back whole; the strict check flags one
+description over the 1024-character limit. dialogram does not run bundled
+scripts and does not enforce `allowed-tools`, which the specification leaves
+to each client.
+The Claude Agent SDK loads skills from
 `.claude/`, and LangChain lists skills among its context-management
 middleware.
 
@@ -337,7 +348,7 @@ does not mean the project lacks it.
 | Provider-neutral persisted conversation state | yes: block IR, 2 providers, replay-tested resume | partial: app persists UI messages; cross-provider not verified | partial: session items; cross-provider not verified | yes: model-independent messages | partial: checkpointed state; cross-provider not verified | not verified: Claude Code JSONL transcripts | not verified | not verified | partial: caller stores JSON history; cross-provider not verified | not verified |
 | Resumable streaming transport | yes: SSE + memory/Redis, cursor resume | yes: `resume` + `resumable-stream` + Redis, app-built endpoints | not verified | not verified | via platform: Agent Server, `Last-Event-ID` | not verified | not verified | not verified | partial (preview): replay by stream id | not verified |
 | UI channel for tool results | yes: `ui_payload`, `gen_ui` | yes: typed tool parts | not verified | via AG-UI / Vercel AI adapters | not verified | not verified | not verified | not verified | not verified | not verified |
-| HITL / pause | yes: pause tools end the turn | yes: `toolApproval`, new call resumes | yes: interruptions, serialisable `RunState` | yes: deferred tools | yes: `interrupt()`, node re-runs | yes: in-loop callback or `defer` hook | yes: `RequireConfirmation` | yes: interrupt + resume | yes: resumable tools | not verified |
+| HITL / pause | yes: pause tools end the turn; AG-UI interrupts | yes: `toolApproval`, new call resumes | yes: interruptions, serialisable `RunState` | yes: deferred tools | yes: `interrupt()`, node re-runs | yes: in-loop callback or `defer` hook | yes: `RequireConfirmation` | yes: interrupt + resume | yes: resumable tools | not verified |
 | Policy / interceptors | yes: interceptor chain, annotation policy | partial: approval map or function | yes: guardrails, approval callables | partial: approval per tool | yes: middleware | yes: hooks, rules, modes | yes: callbacks, plugins | partial: approval tool wrapper | not verified | not verified |
 | Step checkpoints / durable execution | partial: per-step `Checkpointer`, no engine | not verified | partial: serialisable `RunState` | yes: 8 durable engines | yes: checkpointers | partial: sessions, file checkpoints | not verified | yes: `CheckPointStore` | not verified | not verified |
 | Tool execution hardening | yes: timeout, panic recovery, output cap, concurrency bound; no sandbox | partial: abort signal, concurrency limit | partial: per-call timeout (async tools), error function | not verified | partial: retry, error, call-limit middleware | not verified | not verified | not verified | not verified | not verified |
@@ -442,3 +453,5 @@ Protocols
 - https://modelcontextprotocol.io/specification/2025-06-18/schema
 - https://developers.openai.com/api/docs/guides/background
 - https://agentskills.io/specification
+- https://agentskills.io/client-implementation/adding-skills-support (read on 2026-10-24)
+- https://github.com/agentskills/agentskills/tree/main/skills-ref (validator and parser source, read on 2026-10-24)

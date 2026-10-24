@@ -1,10 +1,22 @@
 // Command agui serves a weather assistant over the AG-UI protocol, for
 // CopilotKit-style frontends: POST a RunAgentInput to /agui and read the
-// event stream back. See docs/AGUI.md for the mapping and the pause flow.
+// event stream back. See docs/AGUI.md for the mapping and the interrupt
+// flow.
 //
 //	ANTHROPIC_API_KEY=… go run ./examples/agui
 //	curl -N localhost:8080/agui -H 'Content-Type: application/json' -d '{"threadId":"t1","runId":"r1",
-//	  "messages":[{"id":"u1","role":"user","content":"Weather in Lisbon?"}],"tools":[],"context":[],"forwardedProps":{}}'
+//	  "messages":[{"id":"u1","role":"user","content":"Weather in Lisbon? Book a table at Ramiro for 20:00 if it is dry."}]}'
+//
+// Booking needs the user's approval, so that run ends with RUN_FINISHED
+// carrying an interrupt. Answer it with a new run on the same thread: the
+// messages of the MESSAGES_SNAPSHOT before it, and a resume entry.
+//
+//	curl -N localhost:8080/agui -H 'Content-Type: application/json' -d '{"threadId":"t1","runId":"r2",
+//	  "messages":[…the snapshot messages…],
+//	  "resume":[{"interruptId":"dgi1.…","status":"resolved","payload":{"approved":true}}]}'
+//
+// Optional: AGUI_INTERRUPT_KEY, the key interrupt ids are signed with.
+// Without it a random key is used, and interrupts do not survive a restart.
 package main
 
 import (
@@ -53,16 +65,46 @@ func weatherTool() *tool.Tool {
 	}
 }
 
+// bookTool is a fake restaurant booking. It is annotated destructive, so
+// the policy interceptor pauses it for the user's approval.
+func bookTool() *tool.Tool {
+	return &tool.Tool{
+		Name:        "book_table",
+		Label:       "Book a table",
+		Description: "Book a restaurant table for the user. The user approves the booking before it runs.",
+		Schema:      tool.Obj(map[string]any{"restaurant": tool.Str("Restaurant name"), "time": tool.Str("Time, HH:MM")}, "restaurant", "time"),
+		Fn: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var in struct {
+				Restaurant string `json:"restaurant"`
+				Time       string `json:"time"`
+			}
+			_ = json.Unmarshal(input, &in)
+			return map[string]any{"booked": true, "restaurant": in.Restaurant, "time": in.Time, "reference": "DEMO-1234"}, nil
+		},
+		Annotations: tool.Annotations{Destructive: true},
+	}
+}
+
 func main() {
 	reg := tool.NewRegistry()
 	tool.RegisterHITL(reg)
 	reg.Register(weatherTool())
+	reg.Register(bookTool())
 	cfg := &agent.Config{
 		Profiles: map[string]agent.Profile{"assistant": {MaxToolSteps: 6, SystemPrompt: "You are a concise travel assistant. " +
-			"Only state figures a tool returned. When the city is ambiguous, ask with request_user_choice instead of guessing."}},
+			"Only state figures a tool returned. When the city is ambiguous, ask with request_user_choice instead of guessing. " +
+			"Book with book_table when the user asks for it."}},
 		DefaultProfile: "assistant",
 	}
-	ag, err := dialogram.New(dialogram.SettingsFromEnv(), dialogram.Deps{Registry: reg, Config: cfg})
+	// One executor for the agent's tool calls and for the calls the user
+	// approves on resume, so both get the same timeouts and limits.
+	exec := tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{})
+	ag, err := dialogram.New(dialogram.SettingsFromEnv(), dialogram.Deps{
+		Registry:     reg,
+		Config:       cfg,
+		Executor:     exec,
+		Interceptors: []agent.Interceptor{agent.NewPolicyInterceptor(reg, agent.Policy{PauseDestructive: true})},
+	})
 	if err != nil {
 		slog.Error("configure provider", "err", err)
 		os.Exit(1)
@@ -78,7 +120,7 @@ func main() {
 		return ag.ChatStream(ctx, agent.ChatInput{Turns: turns, Profile: "assistant", MemoryContext: agui.SystemText(in.Messages)}, emit)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/agui", agui.NewHandler(run, agui.Options{}))
+	mux.Handle("/agui", agui.NewHandler(run, agui.Options{Executor: exec, InterruptKey: []byte(os.Getenv("AGUI_INTERRUPT_KEY"))}))
 
 	port := os.Getenv("PORT")
 	if port == "" {

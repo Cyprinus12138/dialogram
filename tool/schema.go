@@ -18,6 +18,13 @@ const (
 	// ErrorCodeRunInterrupted is stamped by agent.CloseDangling on a
 	// tool_use whose run died before its result was recorded.
 	ErrorCodeRunInterrupted = "RUN_INTERRUPTED"
+	// ErrorCodeNotRun is stamped by agent.AnswerPause on the other calls of
+	// a paused turn: the loop never ran them, and the model may call them
+	// again.
+	ErrorCodeNotRun = "NOT_RUN"
+	// ErrorCodeCancelled answers a pause the user dismissed without an
+	// answer (agent.DismissedResultJSON).
+	ErrorCodeCancelled = "USER_CANCELLED"
 )
 
 // Source is the provenance block a data tool attaches to its result so the

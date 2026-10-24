@@ -15,6 +15,9 @@ type RunAgentInput struct {
 	ThreadID    string `json:"threadId"`
 	RunID       string `json:"runId"`
 	ParentRunID string `json:"parentRunId,omitempty"`
+	// ProtocolVersion is the protocol version the client speaks, such as
+	// "1.0"; empty for clients older than the versioned protocol.
+	ProtocolVersion string `json:"protocolVersion,omitempty"`
 	// State is the client's shared-state object, forwarded verbatim.
 	// dialogram has no shared-state concept; a Runner may read it.
 	State json.RawMessage `json:"state,omitempty"`
@@ -28,6 +31,12 @@ type RunAgentInput struct {
 	Context []Context `json:"context"`
 	// ForwardedProps is the application-defined extra payload.
 	ForwardedProps json.RawMessage `json:"forwardedProps,omitempty"`
+	// Resume answers the interrupts that ended the previous run on this
+	// thread. The Handler applies it before the Runner starts: it checks
+	// every entry, runs approved tool calls, and adds the resulting tool
+	// messages to Messages. A Runner sees the entries but need not act on
+	// them.
+	Resume []ResumeEntry `json:"resume,omitempty"`
 }
 
 // Message roles.

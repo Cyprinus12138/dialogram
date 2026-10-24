@@ -12,6 +12,7 @@ transport next to `sse`, over the same `agent.Agent.ChatStream`.
 | Resumable | yes — producer is buffered server-side, client reconnects with `since` | no — AG-UI defines no cursor; a dropped connection loses the rest of the run |
 | Producer lifetime | detached from the HTTP request | the request |
 | Conversation state | the application persists turns (`OnFinish`) | the client holds the history and re-sends it every run |
+| Human in the loop | `waiting_for_user`, answered through the application's own endpoint | an AG-UI interrupt on `RUN_FINISHED`, answered by `resume` on the next run |
 | Frontend | yours | CopilotKit or any AG-UI client |
 
 Use `sse` when you own the frontend and need streams that survive tab
@@ -32,7 +33,9 @@ The body is a `RunAgentInput`. `threadId` and `runId` are echoed on
 `RUN_STARTED` / `RUN_FINISHED` (minted if the client left them blank).
 `messages` is the whole conversation so far, including earlier runs'
 assistant and tool messages; `state`, `tools`, `context` and
-`forwardedProps` are passed to the `Runner` untouched.
+`forwardedProps` are passed to the `Runner` untouched. `resume` answers
+the interrupt the previous run ended on; the handler applies it before the
+`Runner` starts (see *Interrupts and resuming*).
 
 ```go
 run := func(ctx context.Context, in agui.RunAgentInput, emit agent.EmitFn) error {
@@ -89,7 +92,7 @@ context. `Options.RunTimeout` (default 5 min) bounds a run.
 | `tool_result` | `TOOL_CALL_RESULT` (+ `CUSTOM "gen_ui"`) | `content` = the tool output verbatim, `role` = `tool`, fresh `messageId`. A result whose envelope carries `ui_payload`, or a `present_data` result, adds a `CUSTOM "gen_ui"` with that payload — the same derivation `sse` does |
 | `gen_ui` | `CUSTOM "gen_ui"` | `value` = the payload verbatim; deduplicated per tool-use id against the derived one |
 | `usage` | `CUSTOM "usage"` | value `{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model?, provider?, breakdown?}` |
-| `waiting_for_user` | `TEXT_MESSAGE_END` (if open), the pause tool's `TOOL_CALL_START/ARGS/END` (unless already announced), `CUSTOM "waiting_for_user"`, `RUN_FINISHED` | see *Pauses* |
+| `waiting_for_user` | `TEXT_MESSAGE_END` (if open), the pause tool's `TOOL_CALL_START/ARGS/END` (unless already announced), `CUSTOM "waiting_for_user"`, `MESSAGES_SNAPSHOT`, `RUN_FINISHED` with an interrupt outcome | see *Interrupts and resuming* |
 | `done` | `TEXT_MESSAGE_END` (if open), `RUN_FINISHED` | |
 | `error` | `TEXT_MESSAGE_END` (if open), `RUN_ERROR` | `message` = the event's message |
 | `turn` | — | internal boundary event, never on the wire |
@@ -135,45 +138,131 @@ without an id or name, on arguments that are not JSON, and on a tool
 message whose `toolCallId` no earlier assistant message requested — a
 provider would reject that history anyway.
 
-## Pauses and resuming
+## Interrupts and resuming
 
-A human-in-the-loop pause ends the run in AG-UI terms: there is no
-"waiting" state in the protocol, and the client owns the history. The
-encoder therefore emits, in order:
+A pause ends the run with an AG-UI interrupt. The encoder emits, in order:
 
-1. `TOOL_CALL_START/ARGS/END` for the pause tool (`request_user_input`,
-   `request_user_choice`, `request_user_form`, the intercepted tool of an
-   approval, or a custom pause tool) — unless it was already announced, as
-   an approval pause's tool is. This puts the tool call into the client's
-   assistant message, where it needs to be for the resume to work.
-2. `CUSTOM "waiting_for_user"` with value
-   `{kind, tool_use_id, name, input, message, options, multiple}` — what to
-   render: `kind` is one of `hitl`, `hitl_choice`, `hitl_form`, `approval`,
-   `custom`; `message` is the prompt or reason; `options` / `multiple` are
-   set for a choice.
-3. `RUN_FINISHED`.
-
-To resume, the client appends a tool message answering the call and starts
-a new run with the full history:
+1. The pause tool's `TOOL_CALL_START/ARGS/END`, unless it was already
+   announced, as an approval's tool is. This puts the call into the
+   client's assistant message.
+2. `CUSTOM "waiting_for_user"` with `{kind, tool_use_id, name, input,
+   message, options, multiple}`, for clients that render dialogram's pause
+   kinds themselves.
+3. `MESSAGES_SNAPSHOT`: the client's messages exactly as it sent them, then
+   the messages this run added. The spec requires a snapshot before a run
+   ends on an interrupt; echoing the client's messages byte for byte means
+   the snapshot never rewrites content dialogram does not model, such as
+   image parts.
+4. `RUN_FINISHED` with an interrupt outcome:
 
 ```json
-{"id":"…","role":"tool","toolCallId":"<tool_use_id>","content":"{\"selected\":[\"lis\"]}"}
+{"type":"RUN_FINISHED","threadId":"t1","runId":"r1","outcome":{"type":"interrupt","interrupts":[{
+  "id":"dgi1.ZGdfMw.approval.1792918800.p8b…",
+  "reason":"tool_call",
+  "message":"book_table may make irreversible changes. Review the inputs and approve or deny.",
+  "toolCallId":"dg_3",
+  "responseSchema":{"type":"object","properties":{"approved":{"type":"boolean"},"reason":{"type":"string"}},"required":["approved"],"additionalProperties":false},
+  "expiresAt":"2026-10-25T09:00:00Z",
+  "metadata":{"dialogram":{"kind":"approval","tool":"book_table","input":{"restaurant":"Ramiro","time":"20:00"}}}}]}}
 ```
 
-`MessagesToTurns` turns that into the `tool_result` block the loop expects
-after a pause, and the model continues. The result shapes are the ones
-`examples/chatserver` builds in `/chat/respond`: `{"user_response": …}` for
-`hitl`, `{"selected": […], "other_text": …}` for `hitl_choice`,
-`{"answers": {…}}` for `hitl_form`; for an `approval` the application's
-`Runner` should run the intercepted tool itself (or append
-`agent.DeniedResultJSON`) before handing the history to the model —
-the client only reports the decision.
+| Pause | `reason` | `message` | `responseSchema`, and the tool result the answer becomes |
+|---|---|---|---|
+| `request_user_input` | `input_required` | the prompt | `{"user_response": string}`. The payload is the result. |
+| `request_user_choice` | `input_required` | the prompt | `{"selected": [option values], "other_text"?: string}`, the options as titled enum values, one pick unless `multiple`. The payload is the result. |
+| `request_user_form` | `input_required` | the title | `{"answers": {question id: answer}}`: a string for `text`, `{"value"}` for `single_choice`, `{"values"}` for `multi_choice`, with `other_text` where allowed. The payload is the result. |
+| approval | `tool_call` | the interceptor's reason | `{"approved": boolean, "reason"?: string}`. Approving runs the call and its output is the result; declining gives `agent.DeniedResultJSON`. |
+| custom pause tool | `dialogram:<tool>` | | none. The payload, any JSON, is the result. |
+
+These are the result bodies `examples/chatserver` builds in `/chat/respond`,
+so the model reads the same thing whichever transport the user is on.
+
+### Resuming
+
+Start a new run on the same thread with the snapshot's messages and a
+resume entry for the interrupt:
+
+```json
+{"threadId":"t1","runId":"r2","messages":[…],
+ "resume":[{"interruptId":"dgi1.…","status":"resolved","payload":{"approved":true}}]}
+```
+
+Before the `Runner` is called, the handler:
+
+1. Checks every entry: a known status, an id it signed for this thread and
+   for the call as the history shows it, not expired, and a payload that
+   fits. Nothing runs until every entry passes.
+2. Answers the paused call: with the payload, with the approved call's
+   output through `Options.Executor`, or with a denial. Status `cancelled`
+   gives a `USER_CANCELLED` soft failure, or a denial for an approval.
+3. Answers the assistant message's other unanswered calls with a `NOT_RUN`
+   soft failure, the body `agent.AnswerPause` writes on the `sse` path. The
+   loop surfaces one pause at a time and runs nothing in a turn it pauses
+   for approval, so those calls never ran. The model can make them again,
+   and they then pass the interceptors as usual.
+4. Emits `TOOL_CALL_RESULT` for each answer on the original `toolCallId`,
+   without starting the call again, as the spec requires, and a
+   `CUSTOM "gen_ui"` when an approved call's output carries `ui_payload`.
+5. Puts the tool messages right after the assistant message and calls the
+   `Runner` with that history.
+
+The resumed run then ends like any other: `RUN_FINISHED`, or another
+interrupt.
+
+### The contract, and how the handler keeps it
+
+| Spec rule | What the handler does |
+|---|---|
+| A resume uses the interrupted run's thread. | The id is signed over the thread. Another thread's id fails with `RESUME_INVALID`. |
+| `interruptId` names an interrupt of the interrupted run. | The id is signed over the call's id, name and canonical arguments and the pause kind. A forged id, or a history whose call was edited, fails with `RESUME_INVALID`. |
+| A resume answers every open interrupt. | A run raises one interrupt. A resume that leaves it open fails with `INTERRUPT_PENDING`. |
+| Pending interrupts block new input. | A run without `resume` while the last tool-call message has unanswered calls fails with `INTERRUPT_PENDING`. |
+| Replaying a resume is safe. | An entry whose call the history already answers is skipped. An approved call's output is kept for `InterruptTTL`, so a replay from a history without the result reuses it, and identical concurrent resumes share one execution. |
+| The agent may validate the payload. | It does, against the shapes above. A mismatch fails with `RESUME_INVALID`, naming the field. |
+| A resume after `expiresAt` is refused. | `InterruptTTL`, default 24 hours, sets `expiresAt`. A resolved resume after it fails with `RESUME_EXPIRED`; a cancelled one is accepted, so the thread can move on. |
+| `RUN_ERROR` is the only error event. | Every refusal is `RUN_ERROR` with `code` `INTERRUPT_PENDING`, `RESUME_INVALID`, `RESUME_EXPIRED` or `HISTORY_INVALID` and a message saying what to fix. The `Runner` is not called. |
+
+### Why interrupt ids are signed
+
+The handler keeps no conversation state: the client's history is the
+record. Approving means running a tool, and running a tool on the strength
+of a client-sent history would let any client write itself an assistant
+message calling `book_table` with arguments of its choosing and then
+approve it. The signature binds the interrupt to a call this endpoint
+paused on, so the history can be trusted for that one call. Give every
+instance the same `Options.InterruptKey`; without one each `Handler` draws
+a random key, and its interrupts end with the process.
+
+An approved call runs on a context that ignores client disconnects,
+bounded by `RunTimeout`. The user approved the effect, so it completes,
+and its output is kept for a replay. That protection lives in the process:
+a replay that reaches another instance, from a client that lost the
+result, runs the call again. Make side-effecting tools idempotent where
+that matters (`tool.Annotations.Idempotent` records it).
+
+Editing the arguments before approving, `editedArgs` in the spec, is not
+offered. The approval schema has no `editedArgs`, and a payload carrying
+it is refused.
+
+### The way that predates interrupts
+
+A client that ignores the interrupt outcome can still read
+`CUSTOM "waiting_for_user"`, append a tool message answering the call
+itself, and start a new run without `resume`. The handler accepts that
+history and answers the turn's other calls as not run. For an approval
+answered this way the `Runner` has to run the tool itself, as before: the
+client only reports the decision.
 
 ## Limitations
 
-- **No resume.** One run is one HTTP response. Use `sse` if you need it.
-- **No server-side state.** The handler persists nothing; a `Runner` that
-  wants to keep turns can wrap `emit` with an `agent.Accumulator`.
+- **No stream resumption.** One run is one HTTP response, and a dropped
+  connection loses the rest of it. Use `sse` if you need it. Interrupts
+  are resumed, the AG-UI way.
+- **No conversation state.** The handler persists nothing but the outputs
+  of approved calls, in memory, for replays. A `Runner` that wants to keep
+  turns can wrap `emit` with an `agent.Accumulator`.
+- **One interrupt per run.** The loop surfaces one pause at a time, so an
+  interrupt outcome always holds exactly one interrupt.
 - **Client tools are not dispatched.** `RunAgentInput.tools` reaches the
   `Runner` untouched; dialogram only calls tools in its own Registry. A
   `Runner` can register them as pause tools if the frontend should run them.
@@ -196,6 +285,10 @@ the client only reports the decision.
   github.com/ag-ui-protocol/ag-ui (`sdks/typescript/packages/encoder/src/encoder.ts`,
   `sdks/python/ag_ui/encoder/encoder.py`) — `data: <json>\n\n`, `text/event-stream`
 - github.com/ag-ui-protocol/ag-ui `sdks/typescript/packages/client/src/apply/default.ts` —
-  how the reference client applies `parentMessageId` and `TOOL_CALL_RESULT`
+  how the reference client applies `parentMessageId`, `TOOL_CALL_RESULT` and
+  `MESSAGES_SNAPSHOT` (merged by message id, which is why the snapshot keeps the ids)
+- https://docs.ag-ui.com/concepts/interrupts and github.com/ag-ui-protocol/ag-ui
+  `spec/1.0/schema.json` (`RunFinishedOutcome`, `Interrupt`, `ResumeEntry`,
+  `RunAgentInput.resume`), read on 2026-10-24
 - github.com/ag-ui-protocol/ag-ui `sdks/typescript/packages/core/src/generated/schemas.ts` —
   `TextPart` (`{type:"text", text}`), `UserMessage.content` as string or parts

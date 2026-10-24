@@ -67,8 +67,87 @@
     }
   },
   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+      {
+        "id": "id_1",
+        "role": "assistant",
+        "content": "One question first.",
+        "toolCalls": [
+          {
+            "id": "dg_2",
+            "type": "function",
+            "function": {
+              "name": "request_user_choice",
+              "arguments": "{\"prompt\":\"Which city?\",\"options\":[{\"label\":\"Lisbon\",\"value\":\"lis\"},{\"label\":\"Porto\",\"value\":\"opo\"}]}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
     "type": "RUN_FINISHED",
     "threadId": "thread_1",
-    "runId": "run_1"
+    "runId": "run_1",
+    "outcome": {
+      "type": "interrupt",
+      "interrupts": [
+        {
+          "id": "dg_2",
+          "reason": "input_required",
+          "message": "Which city?",
+          "toolCallId": "dg_2",
+          "responseSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "selected": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "const": "lis",
+                      "title": "Lisbon"
+                    },
+                    {
+                      "const": "opo",
+                      "title": "Porto"
+                    }
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 1,
+                "minItems": 1,
+                "title": "Which city?",
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "selected"
+            ],
+            "type": "object"
+          },
+          "metadata": {
+            "dialogram": {
+              "kind": "hitl_choice",
+              "tool": "request_user_choice",
+              "input": {
+                "prompt": "Which city?",
+                "options": [
+                  {
+                    "label": "Lisbon",
+                    "value": "lis"
+                  },
+                  {
+                    "label": "Porto",
+                    "value": "opo"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 ]

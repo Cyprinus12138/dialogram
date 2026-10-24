@@ -1,7 +1,7 @@
 // Command chatserver is a runnable reference deployment of dialogram: a
 // travel-assistant chat with resumable streaming, inline charts and tables,
-// human-in-the-loop choices, an approval-gated tool and an in-memory
-// conversation store. It is deliberately small — read it top to bottom to
+// human-in-the-loop choices, an approval-gated tool, an Agent Skills package
+// and an in-memory conversation store. It is deliberately small — read it top to bottom to
 // see how the pieces fit, then replace the store and the tools with yours.
 //
 //	ANTHROPIC_API_KEY=… go run ./examples/chatserver
@@ -35,6 +35,13 @@ import (
 
 //go:embed static/*
 var static embed.FS
+
+// skillFiles holds the example's Agent Skills packages, one directory per
+// skill (see docs/SKILLS.md). The same SKILL.md files work in any client that
+// reads the format.
+//
+//go:embed skills
+var skillFiles embed.FS
 
 const systemPrompt = `You are a concise travel assistant. You help with weather, flights and bookings for a trip.
 
@@ -245,6 +252,26 @@ func (s *store) snapshot(id string) (conversation, bool) {
 	return cp, true
 }
 
+// missingAnswer names what a /chat/respond body lacks for the pause kind,
+// or returns "" when it can be acted on.
+func missingAnswer(kind string, req respondBody) string {
+	switch kind {
+	case agent.PauseKindApproval:
+		if req.Approved == nil {
+			return "approved is required"
+		}
+	case agent.PauseKindHITLChoice:
+		if len(req.Selected) == 0 {
+			return "selected is required"
+		}
+	case agent.PauseKindHITLForm:
+		if len(req.Answers) == 0 {
+			return "answers is required"
+		}
+	}
+	return ""
+}
+
 // ---------------- server ----------------
 
 type streamBody struct {
@@ -264,9 +291,10 @@ type respondBody struct {
 	Approved       *bool                      `json:"approved"`
 }
 
-func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
+// buildDeps assembles what the agent runs with: the tools, the skills, the
+// profile, the approval interceptor, one executor shared with
+// /chat/respond, and the step checkpointer.
+func buildDeps() (dialogram.Deps, *agent.MemCheckpointer, error) {
 	reg := tool.NewRegistry()
 	tool.RegisterHITL(reg)
 	tool.RegisterPresentData(reg)
@@ -275,6 +303,14 @@ func main() {
 	reg.Register(weatherTool())
 	reg.Register(flightsTool())
 	reg.Register(bookTool())
+
+	// Skills: the catalog goes into the cached system prompt, and the model
+	// loads a skill's instructions and bundled files through load_skill.
+	skills, err := agent.LoadSkills(skillFiles, "skills")
+	if err != nil {
+		return dialogram.Deps{}, nil, fmt.Errorf("load skills: %w", err)
+	}
+	agent.RegisterLoadSkill(reg, skills)
 
 	cfg := &agent.Config{
 		Profiles:       map[string]agent.Profile{"assistant": {SystemPrompt: systemPrompt, MaxToolSteps: 8}},
@@ -286,34 +322,31 @@ func main() {
 	// for the example; production keys this on the same store as the
 	// conversations.
 	checkpoints := agent.NewMemCheckpointer()
+	// One executor for the agent's tool calls and for the calls the user
+	// approves in /chat/respond, so both get the same timeouts and limits.
+	exec := tool.NewLocalExecutor(reg, tool.LocalExecutorOptions{})
 	deps := dialogram.Deps{
 		Registry:     reg,
 		Config:       cfg,
 		Interceptors: []agent.Interceptor{agent.NewApprovalListInterceptor([]string{"book_flight"})},
+		Skills:       skills,
+		Executor:     exec,
 		Checkpointer: checkpoints,
 	}
-	if os.Getenv("GUARD") != "" {
-		deps.Guard = agent.NewGuard("get_weather", "search_flights")
-	}
-	ag, err := dialogram.New(dialogram.SettingsFromEnv(), deps)
-	if err != nil {
-		slog.Error("configure provider", "err", err)
-		os.Exit(1)
-	}
+	return deps, checkpoints, nil
+}
 
-	var buf streambuf.Store
-	if url := os.Getenv("REDIS_URL"); url != "" {
-		rs, err := streambuf.NewRedisStore(context.Background(), streambuf.RedisOptions{URL: url})
-		if err != nil {
-			slog.Warn("redis unavailable — falling back to in-memory stream buffer", "err", err)
-			buf = streambuf.NewMemStore(0)
-		} else {
-			buf = rs
-		}
-	} else {
-		buf = streambuf.NewMemStore(0)
-	}
+// app is the example's HTTP surface over one agent.
+type app struct {
+	ag          *agent.Agent
+	exec        tool.Executor
+	checkpoints *agent.MemCheckpointer
+	buf         streambuf.Store
+}
 
+// routes wires the conversation store, the resumable stream, the respond
+// endpoint and the web client.
+func (a app) routes() http.Handler {
 	db := newStore()
 
 	produce := func(ctx context.Context, msgID string, body []byte, emit agent.EmitFn) error {
@@ -329,19 +362,29 @@ func main() {
 				db.mu.Unlock()
 				return errors.New("message is required")
 			}
+			// A message sent instead of answering a pause: the paused call
+			// (and the rest of its turn) still needs a result, or the next
+			// request would carry a tool call the provider rejects.
+			if p := conv.Pending; p != nil {
+				result := agent.DismissedResultJSON(p.Kind, "The user sent a new message instead of answering.")
+				if turns, err := agent.AnswerPause(conv.Turns, p.ToolUseID, json.RawMessage(result)); err == nil {
+					conv.Turns = turns
+				}
+				conv.Pending = nil
+			}
 			conv.Turns = append(conv.Turns, agent.UserTurn(req.Message))
 		}
 		history := append([]agent.Turn(nil), conv.Turns...)
 		db.mu.Unlock()
 		// Second meta frame: the conversation id, so a client that created a
 		// fresh conversation learns it from the stream itself.
-		emit(agent.StreamEvent{Type: agent.EventMeta, Message: conv.ID, Provider: ag.Provider(), Model: ag.Model()})
-		return ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant", MessageID: msgID}, emit)
+		emit(agent.StreamEvent{Type: agent.EventMeta, Message: conv.ID, Provider: a.ag.Provider(), Model: a.ag.Model()})
+		return a.ag.ChatStream(ctx, agent.ChatInput{Turns: history, Profile: "assistant", MessageID: msgID}, emit)
 	}
 
 	onFinish := func(_ context.Context, r sse.Result) {
 		// The turns are persisted below; the checkpoint has done its job.
-		checkpoints.Delete(r.MessageID)
+		a.checkpoints.Delete(r.MessageID)
 		db.mu.Lock()
 		defer db.mu.Unlock()
 		convID := db.byMsg[r.MessageID]
@@ -357,7 +400,7 @@ func main() {
 		}
 	}
 
-	handler := sse.NewHandler(buf, produce, sse.Options{OnFinish: onFinish})
+	handler := sse.NewHandler(a.buf, produce, sse.Options{OnFinish: onFinish})
 
 	mux := http.NewServeMux()
 	mux.Handle("/chat/stream", handler)
@@ -379,23 +422,32 @@ func main() {
 		}
 		db.mu.Lock()
 		p := conv.Pending
+		db.mu.Unlock()
 		if p == nil || p.ToolUseID != req.ToolUseID {
-			db.mu.Unlock()
 			http.Error(w, "no matching pending interaction", http.StatusConflict)
 			return
 		}
+		if msg := missingAnswer(p.Kind, req); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+		// Claim the interaction before acting on it, so a second click
+		// cannot answer it again or run an approved tool twice.
+		db.mu.Lock()
+		if conv.Pending != p {
+			db.mu.Unlock()
+			http.Error(w, "the interaction was answered meanwhile", http.StatusConflict)
+			return
+		}
+		conv.Pending = nil
 		db.mu.Unlock()
 
 		// Build the tool_result the model will read on resume.
 		var result json.RawMessage
 		switch p.Kind {
 		case agent.PauseKindApproval:
-			if req.Approved == nil {
-				http.Error(w, "approved is required", http.StatusBadRequest)
-				return
-			}
 			if *req.Approved {
-				out, err := reg.Call(r.Context(), p.ToolName, string(p.ToolInput))
+				out, err := a.exec.Execute(r.Context(), tool.Call{ToolUseID: p.ToolUseID, Name: p.ToolName, Input: p.ToolInput})
 				if err != nil {
 					out = fmt.Sprintf(`{"error_code":%q,"error_message":%q}`, tool.ErrorCodeHardFailure, err.Error())
 				}
@@ -408,26 +460,25 @@ func main() {
 				result = json.RawMessage(agent.DeniedResultJSON(reason))
 			}
 		case agent.PauseKindHITLChoice:
-			if len(req.Selected) == 0 {
-				http.Error(w, "selected is required", http.StatusBadRequest)
-				return
-			}
 			result, _ = json.Marshal(map[string]any{"selected": req.Selected, "other_text": req.OtherText})
 		case agent.PauseKindHITLForm:
-			if len(req.Answers) == 0 {
-				http.Error(w, "answers is required", http.StatusBadRequest)
-				return
-			}
 			result, _ = json.Marshal(map[string]any{"answers": req.Answers})
 		default:
 			result, _ = json.Marshal(map[string]any{"user_response": req.Response})
 		}
+		// AnswerPause also answers the other calls of the paused turn, which
+		// the loop never ran: it surfaces one pause at a time and runs
+		// nothing in a turn it pauses for approval.
 		db.mu.Lock()
-		conv.Turns = append(conv.Turns, agent.Turn{Role: agent.RoleTool, Blocks: []agent.Block{{
-			Type: agent.BlockToolResult, ToolUseID: p.ToolUseID, ToolName: p.ToolName, ToolResult: result,
-		}}})
-		conv.Pending = nil
+		turns, err := agent.AnswerPause(conv.Turns, p.ToolUseID, result)
+		if err == nil {
+			conv.Turns = turns
+		}
 		db.mu.Unlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
@@ -453,6 +504,40 @@ func main() {
 	})
 	sub, _ := fs.Sub(static, "static")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	return mux
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	deps, checkpoints, err := buildDeps()
+	if err != nil {
+		slog.Error("configure the agent", "err", err)
+		os.Exit(1)
+	}
+	if os.Getenv("GUARD") != "" {
+		deps.Guard = agent.NewGuard("get_weather", "search_flights")
+	}
+	ag, err := dialogram.New(dialogram.SettingsFromEnv(), deps)
+	if err != nil {
+		slog.Error("configure provider", "err", err)
+		os.Exit(1)
+	}
+
+	var buf streambuf.Store
+	if url := os.Getenv("REDIS_URL"); url != "" {
+		rs, err := streambuf.NewRedisStore(context.Background(), streambuf.RedisOptions{URL: url})
+		if err != nil {
+			slog.Warn("redis unavailable — falling back to in-memory stream buffer", "err", err)
+			buf = streambuf.NewMemStore(0)
+		} else {
+			buf = rs
+		}
+	} else {
+		buf = streambuf.NewMemStore(0)
+	}
+
+	mux := app{ag: ag, exec: deps.Executor, checkpoints: checkpoints, buf: buf}.routes()
 
 	port := os.Getenv("PORT")
 	if port == "" {

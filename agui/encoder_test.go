@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Cyprinus12138/dialogram/agent"
@@ -15,10 +16,14 @@ import (
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")
 
-// counter mints deterministic ids: prefix1, prefix2, …
+// counter mints deterministic ids: prefix1, prefix2, … It is safe for
+// concurrent use, as Options.NewID must be.
 func counter(prefix string) func() string {
+	var mu sync.Mutex
 	n := 0
 	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
 		n++
 		return fmt.Sprintf("%s%d", prefix, n)
 	}
@@ -228,7 +233,9 @@ func TestEncoderGenUIDedupe(t *testing.T) {
 }
 
 // checkWellFormed asserts the AG-UI run invariants over an event list.
-func checkWellFormed(t *testing.T, events []Event) {
+// checkWellFormed asserts the run invariants. announced lists tool calls an
+// earlier run started, which a resumed run answers without starting again.
+func checkWellFormed(t *testing.T, events []Event, announced ...string) {
 	t.Helper()
 	if len(events) == 0 {
 		t.Fatal("no events")
@@ -243,6 +250,9 @@ func checkWellFormed(t *testing.T, events []Event) {
 	openMsg := ""
 	openCalls := map[string]bool{}
 	started := map[string]bool{}
+	for _, id := range announced {
+		started[id] = true
+	}
 	for i, ev := range events {
 		if i > 0 && ev.Type == EventRunStarted {
 			t.Errorf("event %d: duplicate RUN_STARTED", i)
@@ -295,6 +305,9 @@ func checkWellFormed(t *testing.T, events []Event) {
 			if ev.Type == EventRunError && ev.Message == "" {
 				t.Errorf("event %d: RUN_ERROR without a message", i)
 			}
+			if ev.Outcome != nil {
+				checkInterruptOutcome(t, i, ev, events, started)
+			}
 		}
 		b, err := json.Marshal(ev)
 		if err != nil {
@@ -303,6 +316,36 @@ func checkWellFormed(t *testing.T, events []Event) {
 		var back Event
 		if err := json.Unmarshal(b, &back); err != nil || back.Type != ev.Type {
 			t.Errorf("event %d: round trip failed: %v", i, err)
+		}
+	}
+}
+
+// checkInterruptOutcome asserts what the spec requires of a run that ends
+// on an interrupt: a MESSAGES_SNAPSHOT right before RUN_FINISHED, and every
+// interrupt identified, reasoned and bound to a tool call the snapshot
+// holds.
+func checkInterruptOutcome(t *testing.T, i int, ev Event, events []Event, started map[string]bool) {
+	t.Helper()
+	if ev.Outcome.Type != OutcomeInterrupt || len(ev.Outcome.Interrupts) == 0 {
+		t.Errorf("event %d: an outcome is only set for interrupts, with at least one: %+v", i, ev.Outcome)
+		return
+	}
+	if i == 0 || events[i-1].Type != EventMessagesSnapshot {
+		t.Errorf("event %d: an interrupting RUN_FINISHED must follow a MESSAGES_SNAPSHOT", i)
+		return
+	}
+	inSnapshot := map[string]bool{}
+	for _, m := range events[i-1].Messages {
+		for _, tc := range m.ToolCalls {
+			inSnapshot[tc.ID] = true
+		}
+	}
+	for _, in := range ev.Outcome.Interrupts {
+		if in.ID == "" || in.Reason == "" || in.ToolCallID == "" || !started[in.ToolCallID] || !inSnapshot[in.ToolCallID] {
+			t.Errorf("event %d: interrupt not bound to a started call in the snapshot: %+v", i, in)
+		}
+		if len(in.ResponseSchema) > 0 && !json.Valid(in.ResponseSchema) {
+			t.Errorf("event %d: invalid response schema", i)
 		}
 	}
 }

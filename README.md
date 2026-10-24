@@ -14,12 +14,12 @@ Extracted from [ProProp](https://proprop.algonavis.com/), an AI property advisor
 - **Policy from annotations.** Tools carry MCP-style hints (`ReadOnly`, `Destructive`, `Idempotent`, `OpenWorld`). `agent.PolicyInterceptor` turns them into pause or deny decisions in the same interceptor chain as the approval list. The hints never reach the model.
 - **Tool calls with limits, turns that survive a crash.** The default `tool.LocalExecutor` gives each call a timeout, recovers panics, caps the bytes the model reads back and bounds how many calls run at once. Timeouts and panics reach the model as soft failures. A `Checkpointer` saves the turns at every step boundary, and `CloseDangling` pairs unanswered calls after a crash so the conversation continues on either provider. There is no sandbox: isolation belongs to the tool.
 - **MCP servers as tool sources.** `tool/mcp` connects to a server over stdio or streamable HTTP and registers its tools under a per-server prefix. Server annotations map onto the policy hints, and results from servers you do not operate can be fenced as untrusted.
-- **Human-in-the-loop as tools.** `request_user_input`, `request_user_choice` and `request_user_form` end the turn and wait; an interceptor chain can pause any tool for approval; applications add their own pause tools. Mixed turns (a pause co-requested with real tools) run the real tools and defer the pause deterministically instead of dropping work.
+- **Human-in-the-loop as tools.** `request_user_input`, `request_user_choice` and `request_user_form` end the turn and wait; an interceptor chain can pause any tool for approval; applications add their own pause tools. Mixed turns (a pause co-requested with real tools) run the real tools and defer the pause deterministically instead of dropping work, and `agent.AnswerPause` resumes a paused turn with every call in it answered, so the next request is one both providers accept.
 - **Streams that survive the connection.** The model call is a detached server-side producer writing to a `streambuf.Store` (memory or Redis). The HTTP connection is disposable: a client reconnects with the last `id:` it saw and gets exactly the events it missed. Tab switches, radio sleep and load-balancer hops stop losing replies.
 - **Prompt-cache aware.** The stable system prompt, the tool list and the growing conversation each carry a cache breakpoint; the per-turn volatile context is sent as a separate un-cached block so state drift does not bust the cache.
 - **An honesty guard you can measure.** `agent.Guard` redacts regulated figures stated on a turn with no *successful* grounding tool call. The `eval` package ships the paired before/after harness that measured the first version of this guard in production and found it did nothing — and the two lessons that fixed it are built in.
 - **Traces and metrics per run.** Every `Chat` / `ChatStream` is an OpenTelemetry span tree following the GenAI semantic conventions: an `invoke_agent` run span, a `chat {model}` span per upstream request with token and cache usage, and an `execute_tool {name}` span per tool call with its outcome (success, soft failure, timeout, panic, denied). The sse producer joins the trace of the request that launched it. Nothing is recorded until you install an SDK. Opt-in Prometheus metrics track the per-turn budgets the eval harness asserts.
-- **Skills on demand.** `SKILL.md` bundles are advertised as one-line summaries and loaded through a `load_skill` tool, so the stable prompt stays small.
+- **Skills on demand.** Skills in the [Agent Skills](https://agentskills.io/specification) format (`SKILL.md`) are advertised as a name-and-description catalog in the cached prompt, and the model loads a skill's instructions and its bundled files through a `load_skill` tool. Loading is lenient the way the format's client guide recommends, and `agent.ValidateSkills` applies the strict rules in CI.
 
 ```
 browser ── POST /chat/stream?message_id=X&since=N ──▶ sse.Handler ──▶ streambuf.Store (mem | redis)
@@ -124,7 +124,7 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 | `provider/anthropic`, `provider/openai` | Wire adapters: translators, streaming parsers, cache breakpoints, retries |
 | `streambuf` | `Store` contract with `MemStore` and `RedisStore` |
 | `sse` | The resumable HTTP handler: detached producer, idle watchdog, cancel, gen_ui conversion, `OnFinish` persistence hook |
-| `agui` | [AG-UI protocol](https://docs.ag-ui.com) transport for CopilotKit-compatible frontends: `Encoder` from stream events to AG-UI events, messages ⇄ turns conversion, one-run-per-request handler |
+| `agui` | [AG-UI protocol](https://docs.ag-ui.com) transport for CopilotKit-compatible frontends: `Encoder` from stream events to AG-UI events, messages ⇄ turns conversion, one-run-per-request handler, pauses as AG-UI interrupts resumed with signed ids |
 | `eval` | Grounding checker, LLM-as-judge scenarios, manifest pins, budgets, honesty-guard A/B runner |
 | `dialogram` (root) | `New` / `NewProvider` / `SettingsFromEnv` |
 
@@ -133,7 +133,7 @@ The example has a weather tool that renders a bar chart, a flight search whose r
 - [docs/STREAMING.md](docs/STREAMING.md) — the resumable stream protocol and the store contract
 - [docs/AGUI.md](docs/AGUI.md) — serving a run over the AG-UI protocol, and when to prefer it over `sse`
 - [docs/BLOCK_IR.md](docs/BLOCK_IR.md) — the block IR, the three-channel envelope and artifact handles
-- [docs/SKILLS.md](docs/SKILLS.md) — SKILL.md bundles and on-demand loading
+- [docs/SKILLS.md](docs/SKILLS.md) — Agent Skills: the format, progressive disclosure through `load_skill`, validation, and what is not supported
 - [docs/MCP.md](docs/MCP.md) — MCP servers as tool sources: transports, registration, result mapping, the isolation stance
 - [docs/EVAL.md](docs/EVAL.md) — the three-layer evaluation harness
 - [docs/COMPARISON.md](docs/COMPARISON.md) — how dialogram relates to nine agent frameworks and four protocols, gaps included

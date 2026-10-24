@@ -85,7 +85,7 @@ func builtinRegistry() *tool.Registry {
 	tool.RegisterPresentData(r)
 	tool.RegisterRenderFromRef(r)
 	tool.RegisterNow(r, time.UTC)
-	lib, _ := agent.NewSkillLibrary(&agent.Skill{ID: "example", Name: "Example", Description: "placeholder"})
+	lib, _ := agent.NewSkillLibrary(&agent.Skill{Name: "example", Description: "placeholder"})
 	agent.RegisterLoadSkill(r, lib)
 	return r
 }

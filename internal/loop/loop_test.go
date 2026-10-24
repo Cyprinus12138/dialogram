@@ -163,7 +163,7 @@ func TestEmitHelpersAndText(t *testing.T) {
 }
 
 func TestComposeSystem(t *testing.T) {
-	lib, _ := agent.NewSkillLibrary(&agent.Skill{ID: "alpha", Name: "Alpha", Description: "use when asked about X"})
+	lib, _ := agent.NewSkillLibrary(&agent.Skill{Name: "alpha", Description: "use when asked about X"})
 	if ComposeStableSystem("BASE", nil) != "BASE" || ComposeSystemPrompt("BASE", nil, "") != "BASE" {
 		t.Fatal("nil lib / empty memory must be byte-equal to the base prompt")
 	}

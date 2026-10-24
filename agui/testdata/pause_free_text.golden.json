@@ -33,8 +33,61 @@
     }
   },
   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+      {
+        "id": "id_1",
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "dg_5",
+            "type": "function",
+            "function": {
+              "name": "request_user_input",
+              "arguments": "{\"prompt\":\"What is your budget?\"}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
     "type": "RUN_FINISHED",
     "threadId": "thread_1",
-    "runId": "run_1"
+    "runId": "run_1",
+    "outcome": {
+      "type": "interrupt",
+      "interrupts": [
+        {
+          "id": "dg_5",
+          "reason": "input_required",
+          "message": "What is your budget?",
+          "toolCallId": "dg_5",
+          "responseSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "user_response": {
+                "title": "What is your budget?",
+                "type": "string"
+              }
+            },
+            "required": [
+              "user_response"
+            ],
+            "type": "object"
+          },
+          "metadata": {
+            "dialogram": {
+              "kind": "hitl",
+              "tool": "request_user_input",
+              "input": {
+                "prompt": "What is your budget?"
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 ]

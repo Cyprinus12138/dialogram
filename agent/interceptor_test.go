@@ -122,7 +122,7 @@ func TestPolicyInterceptor_ChainOrderWithApprovalList(t *testing.T) {
 
 func TestLoadSkill_Annotations(t *testing.T) {
 	reg := tool.NewRegistry()
-	lib, err := NewSkillLibrary(&Skill{ID: "example", Name: "Example", Description: "placeholder"})
+	lib, err := NewSkillLibrary(&Skill{Name: "example", Description: "placeholder"})
 	if err != nil {
 		t.Fatal(err)
 	}

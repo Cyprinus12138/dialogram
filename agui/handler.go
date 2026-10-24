@@ -2,6 +2,7 @@ package agui
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Cyprinus12138/dialogram/agent"
+	"github.com/Cyprinus12138/dialogram/tool"
 )
 
 // Runner runs one AG-UI run: typically convert in.Messages with
@@ -31,12 +33,38 @@ type Options struct {
 	// see; raw provider errors should not reach end users. Default
 	// DefaultFriendlyError. sse.DefaultFriendlyError is a richer option.
 	FriendlyError func(error) string
-	// NewID mints message ids and fills in a blank threadId / runId.
-	// Default NewID.
+	// NewID mints message ids and fills in a blank threadId / runId. It is
+	// called from concurrent requests, so it must be safe for concurrent
+	// use. Default NewID.
 	NewID func() string
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
+
+	// Executor runs a tool call the user approved when a run resumes from
+	// an approval interrupt. Pass the executor the agent uses
+	// (dialogram.Deps.Executor, or tool.NewLocalExecutor over the same
+	// registry). Nil means approvals can be declined or cancelled but an
+	// approving resume is refused with RUN_ERROR.
+	Executor tool.Executor
+	// InterruptKey signs interrupt ids, so a resume can only answer a tool
+	// call this endpoint paused on, in the same thread, with the arguments
+	// the user saw. Every instance serving one endpoint must share it.
+	// Empty means a random key per Handler: interrupts then do not survive
+	// a restart and cannot be resumed on another instance.
+	InterruptKey []byte
+	// InterruptTTL is how long an interrupt can be answered; it is sent as
+	// expiresAt. A resolved resume after it is refused, a cancelled one is
+	// still accepted so the thread can move on. The result of an approved
+	// call is kept for as long, so a replayed resume does not run the tool
+	// again. Zero means DefaultInterruptTTL; negative means interrupts never
+	// expire, and a replay older than DefaultInterruptTTL can then run an
+	// approved call a second time.
+	InterruptTTL time.Duration
 }
+
+// DefaultInterruptTTL is how long an interrupt stays answerable when
+// Options.InterruptTTL is zero.
+const DefaultInterruptTTL = 24 * time.Hour
 
 func (o *Options) defaults() {
 	if o.MaxBodyBytes <= 0 {
@@ -54,6 +82,9 @@ func (o *Options) defaults() {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
+	if o.InterruptTTL == 0 {
+		o.InterruptTTL = DefaultInterruptTTL
+	}
 }
 
 // DefaultFriendlyError maps a timeout to one line and everything else to a
@@ -66,12 +97,15 @@ func DefaultFriendlyError(err error) string {
 }
 
 // Handler is the AG-UI endpoint: POST a RunAgentInput, receive the run as
-// text/event-stream frames. One run per request; there is no server-side
-// buffer and no resume (AG-UI defines no cursor) — see package sse for
-// that.
+// text/event-stream frames. One run per request, and no server-side buffer:
+// AG-UI defines no cursor to resume a dropped stream from (package sse
+// does that). Runs that end on an interrupt are resumed the AG-UI way, by a
+// new run whose input carries resume entries; see docs/AGUI.md.
 type Handler struct {
-	run  Runner
-	opts Options
+	run      Runner
+	opts     Options
+	codec    *interruptCodec
+	approved *resultCache
 }
 
 // NewHandler builds a Handler over run.
@@ -80,7 +114,21 @@ func NewHandler(run Runner, opts Options) *Handler {
 		panic("agui: NewHandler needs a Runner")
 	}
 	opts.defaults()
-	return &Handler{run: run, opts: opts}
+	key := opts.InterruptKey
+	if len(key) == 0 {
+		key = make([]byte, 32)
+		_, _ = rand.Read(key)
+	}
+	keep := opts.InterruptTTL
+	if keep < 0 {
+		keep = DefaultInterruptTTL
+	}
+	return &Handler{
+		run:      run,
+		opts:     opts,
+		codec:    &interruptCodec{key: key, ttl: opts.InterruptTTL, now: time.Now},
+		approved: newResultCache(keep, time.Now),
+	}
 }
 
 // ServeHTTP implements http.Handler.
@@ -104,6 +152,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid RunAgentInput: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The messages once more, as sent, for the snapshot an interrupt
+	// requires: it must not rewrite content Message cannot hold.
+	var sent struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	_ = json.Unmarshal(body, &sent)
 	if in.ThreadID == "" {
 		in.ThreadID = h.opts.NewID()
 	}
@@ -124,7 +178,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// must neither race the encoder nor write to a finished response, so
 	// everything goes through one mutex and emit turns inert once the
 	// handler is done.
-	enc := NewEncoder(EncoderOptions{ThreadID: in.ThreadID, RunID: in.RunID, NewID: h.opts.NewID})
+	threadID := in.ThreadID
+	enc := NewEncoder(EncoderOptions{ThreadID: in.ThreadID, RunID: in.RunID, NewID: h.opts.NewID, History: sent.Messages,
+		InterruptID: func(p Pause) (string, time.Time) { return h.codec.mint(threadID, p) }})
 	var mu sync.Mutex
 	closed := false
 	send := func(events []Event) { // caller holds mu
@@ -160,6 +216,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// sees the run open even if the first model byte is slow.
 	emit(agent.StreamEvent{Type: agent.EventMeta, MessageID: in.RunID})
 	started := time.Now()
+
+	// A run that continues from a pause starts with the paused calls'
+	// results, or is refused before the Runner sees it.
+	plan, err := h.planResume(ctx, in, sent.Messages)
+	if err != nil {
+		var refusal *resumeError
+		msg, code := h.opts.FriendlyError(err), ""
+		if errors.As(err, &refusal) {
+			msg, code = refusal.msg, refusal.code
+		}
+		log.Warn("agui resume refused", "code", code, "err", err)
+		finish(func() []Event { return enc.fail(msg, code) })
+		return
+	}
+	if plan != nil {
+		mu.Lock()
+		enc.history = plan.raw
+		send(enc.answered(plan.results))
+		mu.Unlock()
+		in.Messages = plan.messages
+	}
+
 	err = h.safeRun(ctx, in, emit)
 	switch {
 	case err == nil:

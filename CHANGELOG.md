@@ -11,8 +11,17 @@ All notable changes to this project are documented here. The format follows
   `Agent` wrapper, `Profile`/`Config` with per-profile system prompt,
   tool allow-list and step cap, interceptor chain with
   `ApprovalListInterceptor`, built-in and custom pause detection
-  (`DetectPause`, `Config.PauseTools`), `SKILL.md` loader and `load_skill`
-  tool, opt-in Prometheus `Metrics`, `PromptFingerprint`.
+  (`DetectPause`, `Config.PauseTools`), opt-in Prometheus `Metrics`,
+  `PromptFingerprint`.
+- `agent` skills in the [Agent Skills](https://agentskills.io/specification)
+  format. `LoadSkills` discovers `SKILL.md` packages (nested, symlinked, or
+  under a shared root such as `.agents/skills`) and reads every field the
+  specification defines. Loading is lenient where the specification's client
+  guide recommends it and records `Skill.Diagnostics`; `ValidateSkills`
+  applies the reference validator's strict checks. The catalog in the stable
+  prompt is an `<available_skills>` block. `load_skill` takes an enum `name`,
+  an optional `path` that reads one bundled file as text, and an `offset`
+  for text longer than one 32 KiB page. Depends on `go.yaml.in/yaml/v3`.
 - `agent.Guard`: configurable honesty guard with `Signature` detectors,
   per-kind grounding sets, restatement exemption, and `WrapEmit` /
   `GuardReply` for the streaming and non-streaming paths.
@@ -125,6 +134,33 @@ All notable changes to this project are documented here. The format follows
   plainly and sources checked on 2026-10-23. The README gains a short
   "How it compares" section.
 
+- `agui` interrupts: a pause ends the run with `MESSAGES_SNAPSHOT` and a
+  `RUN_FINISHED` whose `outcome` is an AG-UI interrupt (a reason per pause
+  kind, the paused `toolCallId`, a `responseSchema`, `expiresAt`), and the
+  `Handler` resumes from `RunAgentInput.resume`. Every entry is checked
+  before anything runs; an approved call runs through `Options.Executor`
+  and its result is reused on a replay; the paused call is answered with
+  `TOOL_CALL_RESULT` and the turn's other calls with `NOT_RUN`. Interrupt
+  ids are HMAC-signed with `Options.InterruptKey` over the thread and the
+  call, and default to a 24-hour `expiresAt` (`Options.InterruptTTL`).
+  Refusals are `RUN_ERROR` with `INTERRUPT_PENDING`, `RESUME_INVALID`,
+  `RESUME_EXPIRED` or `HISTORY_INVALID`. `CUSTOM "waiting_for_user"` is
+  still sent, and answering with a tool message still works.
+
+- `agent.AnswerPause` resumes a paused conversation: it answers the paused
+  call and every other unanswered call of its turn (`NOT_RUN`, via
+  `agent.NotRunResultJSON`), so a turn that held a second pause, or tools
+  beside one that needed approval, no longer leaves calls without results
+  for the provider to reject. `agent.DismissedResultJSON` closes a pause
+  the user left unanswered (a denial for an approval, `USER_CANCELLED`
+  otherwise); `agent.ErrNotPending`, `tool.ErrorCodeNotRun` and
+  `tool.ErrorCodeCancelled` go with them. Replay tests on both adapters pin
+  the wire shape. `examples/chatserver` resumes with `AnswerPause`, closes a
+  pause when a new message arrives instead of an answer, claims a pending
+  interaction before acting on it so a double click cannot run an approved
+  tool twice, runs approved calls through the agent's executor, and has
+  end-to-end tests over its routes.
+
 ### Changed (relative to the production code this was extracted from)
 - Grounding is outcome-aware: a tool call whose result carries
   `error_code` / `soft_failure` no longer vouches for a figure
@@ -138,3 +174,7 @@ All notable changes to this project are documented here. The format follows
 - Tool visibility is a per-profile allow-list plus a per-turn override,
   instead of per-tool mode restrictions on the registry.
 - Neutral tool-use ids carry the `dg_` prefix.
+- Skills use the Agent Skills format. `name` is the identifier; `id`,
+  `version` and the comma-separated `tool_allowlist` are gone (a version
+  belongs in `metadata`, tool lists in `allowed-tools`). `load_skill` takes
+  `name` instead of `id` and can read a skill's bundled files.

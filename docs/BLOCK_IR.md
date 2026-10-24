@@ -106,7 +106,14 @@ application decides what accepting them means.
 
 An interceptor can pause any tool for approval (`InterceptPause`): the event
 carries the tool's name and input so the application can dispatch it
-verbatim on approve, or append a `DENIED` result on deny.
+verbatim on approve, or answer it with a `DENIED` result on deny. A turn
+paused for approval runs none of its calls, the approved one included.
+
+**One pause at a time.** A paused turn can hold more calls than the one the
+user is asked about: a second pause tool, or the other tools of a turn in
+which one needed approval. The loop surfaces one pause and leaves the rest
+unanswered. Resume with `agent.AnswerPause` (below), which answers them as
+not run so the model can make those calls again.
 
 **Mixed turns.** When a model co-requests a pause alongside real tool calls,
 the loop runs the real tools, attaches their results, and pairs each pause
@@ -117,12 +124,25 @@ pairing is mandatory — and the real work is never dropped.
 
 ## Resuming
 
-To resume a paused conversation, append a `tool` turn with one
-`tool_result` block whose `ToolUseID` matches the pending pause, then run a
-new turn with the extended history. The shape of the result body is a
-contract between the application and its prompt; the example server uses
-`{"user_response": …}`, `{"selected": […], "other_text": …}`,
-`{"answers": {…}}`, and the dispatched tool's own output on approval.
+Resume a paused conversation with `agent.AnswerPause(turns, toolUseID,
+result)` and run a new turn on what it returns. It answers the pending call
+with `result`, answers every other call of the same assistant turn that has
+no result with a `NOT_RUN` soft failure (`agent.NotRunResultJSON`), and
+puts the results in the tool turn right after the paused assistant turn.
+Appending a tool turn with only the paused call's result is not enough when
+the turn held other calls: both wire protocols reject a history in which a
+tool call has no result. `agent.ErrNotPending` reports a call that is
+unknown or already answered.
+
+The shape of the result body is a contract between the application and its
+prompt; the example server uses `{"user_response": …}`,
+`{"selected": […], "other_text": …}`, `{"answers": {…}}`, and the
+dispatched tool's own output on approval.
+
+When the user sends a new message instead of answering, close the pause
+before appending it: `agent.DismissedResultJSON(kind, reason)` reads as a
+denial for an approval and as a `USER_CANCELLED` soft failure for any other
+pause, and `AnswerPause` places it before the new message.
 
 ## Annotations, policy and provenance
 
