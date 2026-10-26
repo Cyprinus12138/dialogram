@@ -162,6 +162,4 @@ LLM_PROVIDER=openai OPENAI_API_KEY=… OPENAI_BASE_URL=https://api.groq.com/open
 
 ## 许可
 
-PolyForm Noncommercial 1.0.0，见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
-
-非商业使用免费：个人项目、研究、教育，以及非商业组织的使用。商业使用需要另行授权，请通过 NOTICE 中链接的 GitHub 主页联系作者。必须署名：任何完整或部分的副本都要保留 `Required Notice: Copyright 2026 Mr.Cyprinus (https://github.com/Cyprinus12138)` 这一行。
+[MIT](LICENSE)。Copyright 2026 Mr.Cyprinus (https://github.com/Cyprinus12138)。

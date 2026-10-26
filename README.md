@@ -157,6 +157,4 @@ Pre-1.0. The public surface may still move; see [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-PolyForm Noncommercial 1.0.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
-Noncommercial use is free: personal projects, research, education, and use by noncommercial organisations. Commercial use requires a separate licence; contact the author via the GitHub profile linked in the notice. Attribution is required: keep the `Required Notice: Copyright 2026 Mr.Cyprinus (https://github.com/Cyprinus12138)` line with any copy, in whole or in part.
+[MIT](LICENSE). Copyright 2026 Mr.Cyprinus (https://github.com/Cyprinus12138).

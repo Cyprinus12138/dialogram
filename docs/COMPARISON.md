@@ -57,9 +57,6 @@ the project lacks it, and these projects change quickly.
 - Two providers. Anthropic Messages and OpenAI-compatible Chat
   Completions. No Gemini, Bedrock or Vertex adapter, and no Responses API.
 - Go only.
-- PolyForm Noncommercial 1.0.0. Commercial use needs a separate licence.
-  Every other project on this page is MIT or Apache-2.0, except the Claude
-  Agent SDK, which is under Anthropic's Commercial Terms of Service.
 - No sandbox. Isolating a tool's process, files or network is the tool's
   job (see the trust boundary in [BLOCK_IR.md](BLOCK_IR.md)).
 - No hosted platform. No dashboard, deployment tooling or managed runs.
@@ -364,7 +361,7 @@ does not mean the project lacks it.
 | Tracing | OpenTelemetry spans; Prometheus metrics | OpenTelemetry | yes: OpenAI backend by default | OpenTelemetry | via LangSmith (OTel integration) | OpenTelemetry (traces beta) | OpenTelemetry | callbacks (Langfuse handler) | OpenTelemetry | not verified |
 | Built-in evals | yes: loop evals, grounding, judge, honesty A/B | not verified | via OpenAI platform | yes: Pydantic Evals | via LangSmith | not verified | listed in ADK docs; Go not verified | evaluators in eino-ext | yes: 3 evaluators + CLI | not verified |
 | Multi-agent / orchestration | no | not verified | yes: handoffs, agents-as-tools | yes: Pydantic Graph | yes: graphs, subagents | yes: subagents | yes: workflow agents, A2A | yes: graphs, DeepAgent | not verified | partial: chains, agents |
-| Licence | PolyForm Noncommercial 1.0.0 | Apache-2.0 | MIT | MIT | MIT | Anthropic Commercial Terms | Apache-2.0 | Apache-2.0 | Apache-2.0 | MIT |
+| Licence | MIT | Apache-2.0 | MIT | MIT | MIT | Anthropic Commercial Terms | Apache-2.0 | Apache-2.0 | Apache-2.0 | MIT |
 
 ## Sources
 
