@@ -5,7 +5,10 @@
 **会画图的对话。** 一个不依赖特定模型厂商的 Go agent 运行时，支持在对话中生成界面、暂停并等待人工参与，以及断线后恢复流式输出。
 
 [![ci](https://github.com/Cyprinus12138/dialogram/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyprinus12138/dialogram/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Cyprinus12138/dialogram.svg)](https://pkg.go.dev/github.com/Cyprinus12138/dialogram)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Cyprinus12138/dialogram)](https://goreportcard.com/report/github.com/Cyprinus12138/dialogram)
+[![Go version](https://img.shields.io/github/go-mod/go-version/Cyprinus12138/dialogram)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 本项目从 [ProProp](https://proprop.algonavis.com/) 中独立出来。ProProp 是已投入生产使用的新加坡 AI 房产顾问，这个运行时为其提供 53 个工具，并支持网页、iOS 和 Telegram 三端的内嵌生成式界面与人工交互。
 

@@ -5,7 +5,10 @@
 **Conversations that draw.** A provider-neutral agent runtime for Go with inline generative UI, human-in-the-loop pauses, and streams that survive the connection.
 
 [![ci](https://github.com/Cyprinus12138/dialogram/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyprinus12138/dialogram/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Cyprinus12138/dialogram.svg)](https://pkg.go.dev/github.com/Cyprinus12138/dialogram)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Cyprinus12138/dialogram)](https://goreportcard.com/report/github.com/Cyprinus12138/dialogram)
+[![Go version](https://img.shields.io/github/go-mod/go-version/Cyprinus12138/dialogram)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Extracted from [ProProp](https://proprop.algonavis.com/), an AI property advisor for Singapore running in production, where this runtime drives 53 tools, inline generative UI and human-in-the-loop across web, iOS and Telegram.
 
