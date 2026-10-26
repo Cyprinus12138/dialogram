@@ -121,7 +121,9 @@ type Options struct {
 	// it, so the run's spans join the request's trace.
 	ProducerContext func(r *http.Request) context.Context
 	// OnFinish is called once per producer run, on a fresh context, after
-	// the terminal event is in the buffer.
+	// the terminal event is in the buffer and before the stream is marked
+	// finished, so what it persists is in place when a client's stream
+	// ends.
 	OnFinish func(ctx context.Context, r Result)
 	// FriendlyError maps a producer error to the message clients see.
 	// Default DefaultFriendlyError.
@@ -477,11 +479,14 @@ func (h *Handler) run(ctx context.Context, ctl *producerCtl, msgID string, body 
 		if res.Cancelled {
 			append_(fctx, agent.StreamEvent{Type: agent.EventDone, Message: "cancelled"})
 		}
-		if err := h.store.Finish(fctx, msgID, status); err != nil {
-			log.Warn("stream finish", "err", err, "message_id", msgID, "status", status)
-		}
+		// Persist before the stream is marked finished: a client that sees
+		// its stream end and reloads must find the turns and any pending
+		// pause already stored.
 		if h.opts.OnFinish != nil {
 			h.opts.OnFinish(fctx, res)
+		}
+		if err := h.store.Finish(fctx, msgID, status); err != nil {
+			log.Warn("stream finish", "err", err, "message_id", msgID, "status", status)
 		}
 	}
 

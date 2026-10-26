@@ -178,8 +178,10 @@ that hang without returning bytes), and the cancel endpoint, which marks the
 stop as intentional so it lands as a clean `done` rather than an error.
 Finalisation (the terminal event, `Finish`, the `OnFinish` hook) runs on a
 fresh short-lived context so it lands even when the primary context has
-already expired. A panicking producer still leaves a terminal error frame
-behind.
+already expired. `OnFinish` runs before `Finish`, so a client whose stream
+has ended can reload the conversation and find the turns and any pending
+pause already persisted. A panicking producer still leaves a terminal error
+frame behind.
 
 `turn` events are filtered off the wire; they exist to let the server
 accumulate the block IR to persist. `present_data` is converted into a

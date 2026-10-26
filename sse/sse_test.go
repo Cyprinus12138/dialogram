@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +132,28 @@ func TestFirstConnect_StreamsAndFinishes(t *testing.T) {
 	defer mu.Unlock()
 	if finished.Status != streambuf.StatusDone || len(finished.Turns) != 1 || finished.Usage.InputTokens != 10 || !finished.EmittedText {
 		t.Fatalf("OnFinish result wrong: %+v", finished)
+	}
+}
+
+// A client that reloads as soon as its stream ends must find what OnFinish
+// persists, so the stream may not end before OnFinish returns.
+func TestOnFinish_LandsBeforeTheStreamEnds(t *testing.T) {
+	produce := func(ctx context.Context, msgID string, body []byte, emit agent.EmitFn) error {
+		emit(agent.StreamEvent{Type: agent.EventText, Delta: "hi"})
+		emit(agent.StreamEvent{Type: agent.EventDone})
+		return nil
+	}
+	var persisted atomic.Bool
+	_, srv, _ := newTestHandler(t, produce, Options{OnFinish: func(context.Context, Result) {
+		time.Sleep(50 * time.Millisecond)
+		persisted.Store(true)
+	}})
+	_, fs := post(t, srv.URL+"/chat/stream?message_id=m1", `{"message":"hi"}`)
+	if got := types(fs); got != "meta,text,done" {
+		t.Fatalf("frames = %s", got)
+	}
+	if !persisted.Load() {
+		t.Fatal("the stream ended before OnFinish persisted the run")
 	}
 }
 
